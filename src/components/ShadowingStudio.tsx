@@ -44,6 +44,7 @@ interface ShadowingStudioProps {
   autoPauseTriggerCount: number;
   latestReport?: ShadowingAssessmentReport | null;
   onAdvanceToNextSegment?: () => TranscriptSegment | null;
+  onAdvanceToSegmentIndex?: (index: number) => TranscriptSegment | null;
 }
 
 export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
@@ -61,6 +62,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   autoPauseTriggerCount,
   latestReport,
   onAdvanceToNextSegment,
+  onAdvanceToSegmentIndex,
 }) => {
   const [sessionState, setSessionState] = useState<
     | 'idle'
@@ -390,17 +392,53 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       const micStarted = await startMicrophoneCapture();
       if (!micStarted) return;
 
-      // 3. Determine starting position and play continuously to the end of the video
-      const initialStartSec =
-        targetSegments.length > 1
-          ? targetSegments[0].startTime
-          : activeSegment?.startTime || 0;
-      simultaneousStartVideoSecRef.current = initialStartSec;
+      // 3. Determine starting position for this simultaneous session:
+      let startSec = activeSegment?.startTime || 0;
+
+      // Check if previous simultaneous session was evaluated and needs to advance to the next section
+      const isSimultaneousEvaluated = Boolean(
+        latestReport &&
+          latestReport.mode === 'simultaneous' &&
+          latestReport.segmentIds &&
+          latestReport.segmentIds.length > 0
+      );
+
+      if (isSimultaneousEvaluated && latestReport) {
+        const lastEvaluatedId =
+          latestReport.segmentIds[latestReport.segmentIds.length - 1];
+        const lastIdx = allSegments.findIndex((s) => s.id === lastEvaluatedId);
+        if (lastIdx !== -1 && lastIdx + 1 < allSegments.length) {
+          const nextIndex = lastIdx + 1;
+          const nextSeg = onAdvanceToSegmentIndex
+            ? onAdvanceToSegmentIndex(nextIndex)
+            : allSegments[nextIndex];
+          if (nextSeg) {
+            startSec = nextSeg.startTime;
+          }
+        }
+      } else {
+        const hasSpecificSubset =
+          targetSegments.length > 0 &&
+          targetSegments.length < allSegments.length;
+
+        if (hasSpecificSubset) {
+          startSec = targetSegments[0].startTime;
+        } else if (playerHandleRef.current) {
+          const curTime = playerHandleRef.current.getCurrentTime();
+          if (curTime > 0.5 && Math.abs(curTime - (activeSegment?.startTime || 0)) < 3.0) {
+            startSec = curTime;
+          } else {
+            startSec = activeSegment?.startTime || 0;
+          }
+        }
+      }
+
+      simultaneousStartVideoSecRef.current = startSec;
 
       if (playerHandleRef.current) {
         const currentVidTime = playerHandleRef.current.getCurrentTime();
-        if (Math.abs(currentVidTime - initialStartSec) > 1.5) {
-          playerHandleRef.current.seekTo(initialStartSec, true);
+        if (Math.abs(currentVidTime - startSec) > 0.5) {
+          playerHandleRef.current.seekTo(startSec, true);
         }
         playerHandleRef.current.play();
       }
@@ -729,13 +767,29 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           {sessionState === 'idle' || sessionState === 'recorded_ready' ? (
             <>
               {(() => {
-                const isCurrentEvaluated = Boolean(
+                const isListenRepeatEvaluated = Boolean(
                   mode === 'listen_repeat' &&
                     latestReport &&
                     latestReport.mode === 'listen_repeat' &&
                     latestReport.segmentIds.includes(activeSegment.id)
                 );
-                const hasNext = activeSegment.index + 1 < allSegments.length;
+                const hasNextSentence = activeSegment.index + 1 < allSegments.length;
+
+                const isSimultaneousEvaluated = Boolean(
+                  mode === 'simultaneous' &&
+                    latestReport &&
+                    latestReport.mode === 'simultaneous' &&
+                    latestReport.segmentIds &&
+                    latestReport.segmentIds.length > 0
+                );
+                const lastSimultaneousId = isSimultaneousEvaluated
+                  ? latestReport!.segmentIds[latestReport!.segmentIds.length - 1]
+                  : null;
+                const lastSimultaneousIdx = lastSimultaneousId
+                  ? allSegments.findIndex((s) => s.id === lastSimultaneousId)
+                  : -1;
+                const hasNextSection =
+                  lastSimultaneousIdx !== -1 && lastSimultaneousIdx + 1 < allSegments.length;
 
                 return (
                   <>
@@ -745,24 +799,32 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
                       disabled={isEvaluating}
                       className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                     >
-                      {isCurrentEvaluated && hasNext ? (
+                      {mode === 'listen_repeat' ? (
+                        isListenRepeatEvaluated && hasNextSentence ? (
+                          <>
+                            <ArrowRight className="w-4 h-4" />
+                            <span>Start Listen-Then-Repeat (Next Sentence)</span>
+                          </>
+                        ) : (
+                          <>
+                            <Mic className="w-4 h-4" />
+                            <span>Start Listen-Then-Repeat</span>
+                          </>
+                        )
+                      ) : isSimultaneousEvaluated && hasNextSection ? (
                         <>
                           <ArrowRight className="w-4 h-4" />
-                          <span>Start Listen-Then-Repeat (Next Sentence)</span>
+                          <span>Start Simultaneous Shadowing (Next Section)</span>
                         </>
                       ) : (
                         <>
                           <Mic className="w-4 h-4" />
-                          <span>
-                            {mode === 'listen_repeat'
-                              ? 'Start Listen-Then-Repeat'
-                              : 'Start Simultaneous Shadowing'}
-                          </span>
+                          <span>Start Simultaneous Shadowing</span>
                         </>
                       )}
                     </button>
 
-                    {isCurrentEvaluated && mode === 'listen_repeat' && (
+                    {isListenRepeatEvaluated && mode === 'listen_repeat' && (
                       <button
                         type="button"
                         onClick={() => {
@@ -781,6 +843,36 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
                         <span>Retry Current Sentence</span>
+                      </button>
+                    )}
+
+                    {isSimultaneousEvaluated && mode === 'simultaneous' && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const firstEvaluatedId = latestReport!.segmentIds[0];
+                          const firstIdx = allSegments.findIndex((s) => s.id === firstEvaluatedId);
+                          const targetIdx = firstIdx !== -1 ? firstIdx : 0;
+                          const targetSeg = onAdvanceToSegmentIndex
+                            ? onAdvanceToSegmentIndex(targetIdx)
+                            : allSegments[targetIdx];
+                          const retryStartSec = targetSeg?.startTime || 0;
+                          simultaneousStartVideoSecRef.current = retryStartSec;
+                          setMicError(null);
+                          setRecordedAudioUrl(null);
+                          setRecordedBase64(undefined);
+                          setCapturedSimultaneousSegments(null);
+                          const micStarted = await startMicrophoneCapture();
+                          if (micStarted && playerHandleRef.current) {
+                            playerHandleRef.current.seekTo(retryStartSec, true);
+                            playerHandleRef.current.play();
+                          }
+                        }}
+                        disabled={isEvaluating}
+                        className="flex items-center gap-1.5 px-3 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Retry Previous Section</span>
                       </button>
                     )}
                   </>

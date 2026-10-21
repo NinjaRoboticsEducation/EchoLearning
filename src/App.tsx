@@ -559,6 +559,13 @@ export default function App() {
     return null;
   };
 
+  const handleAdvanceToSegmentIndex = (targetIndex: number): TranscriptSegment | null => {
+    if (!currentVideo || currentVideo.segments.length === 0) return null;
+    const clampedIndex = Math.max(0, Math.min(targetIndex, currentVideo.segments.length - 1));
+    setActiveSegmentIndex(clampedIndex);
+    return currentVideo.segments[clampedIndex];
+  };
+
   const handleSaveVocabularyWord = (entry: DictionaryLookupResult) => {
     if (!currentVideo) return;
     const newItem: SavedVocabularyItem = {
@@ -1073,6 +1080,7 @@ export default function App() {
                         autoPauseTriggerCount={autoPauseTriggerCount}
                         latestReport={latestReport}
                         onAdvanceToNextSegment={handleAdvanceToNextSegment}
+                        onAdvanceToSegmentIndex={handleAdvanceToSegmentIndex}
                       />
                     )}
 
