@@ -55,6 +55,7 @@ export interface DictionaryLookupResult {
   usageExample: string;
   usageExampleTranslation: string;
   pronunciationTip: string;
+  conversationExamples?: Array<{ sentence: string; translation: string }>;
 }
 
 export type DiffTokenStatus =

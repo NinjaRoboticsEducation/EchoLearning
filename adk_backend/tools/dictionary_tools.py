@@ -141,15 +141,26 @@ def hiragana_to_romaji(text: str) -> str:
     return "".join(result)
 
 
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
+
+
 async def lookup_free_dictionary(word: str) -> dict[str, Any]:
-    """ADK FunctionTool: Queries FreeDictionary API for English IPA phonetic and definitions."""
+    """ADK FunctionTool: Queries FreeDictionary and Datamuse APIs for English IPA phonetics and definitions."""
     clean_word = word.strip().lower()
     if not clean_word:
-        return {"found": False, "word": word}
+        return {"found": False, "word": word, "definitions": []}
 
+    headers = {"User-Agent": DEFAULT_USER_AGENT}
+    definitions: list[str] = []
+    ipa = ""
+    pos_list: list[str] = []
+
+    # 1. Primary: FreeDictionary API
     try:
         url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{clean_word}"
-        async with httpx.AsyncClient(timeout=4.0) as client:
+        async with httpx.AsyncClient(headers=headers, timeout=4.0) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
                 data = resp.json()
@@ -161,26 +172,141 @@ async def lookup_free_dictionary(word: str) -> dict[str, Any]:
                             if ph.get("text"):
                                 ipa = ph["text"]
                                 break
-                    definitions: list[str] = []
-                    pos_list: list[str] = []
                     for m in entry.get("meanings", []):
                         p = m.get("partOfSpeech", "")
                         if p and p not in pos_list:
                             pos_list.append(p)
                         for d in m.get("definitions", [])[:2]:
                             if d.get("definition"):
-                                definitions.append(f"{p}: {d['definition']}")
-                    return {
-                        "found": True,
-                        "word": clean_word,
-                        "ipa": ipa,
-                        "partOfSpeech": ", ".join(pos_list) if pos_list else "Word",
-                        "definitions": definitions[:3],
-                    }
+                                definitions.append(f"{p}: {d['definition']}" if p else d["definition"])
     except Exception as exc:
         print(f"FreeDictionary API notice: {exc}")
 
-    return {"found": False, "word": word}
+    # 2. Fallback: Datamuse API (fast lexical definitions)
+    if not definitions:
+        try:
+            dm_url = "https://api.datamuse.com/words"
+            async with httpx.AsyncClient(headers=headers, timeout=4.0) as client:
+                resp = await client.get(dm_url, params={"sp": clean_word, "md": "dpf", "max": 1})
+                if resp.status_code == 200:
+                    dm_data = resp.json()
+                    if dm_data and len(dm_data) > 0:
+                        raw_defs = dm_data[0].get("defs", [])
+                        for rd in raw_defs[:3]:
+                            parts = rd.split("\t", 1)
+                            if len(parts) == 2:
+                                pos_code, def_text = parts
+                                definitions.append(f"({pos_code}) {def_text.strip()}")
+                                if pos_code not in pos_list:
+                                    pos_list.append(pos_code)
+                            else:
+                                definitions.append(rd.strip())
+        except Exception as exc:
+            print(f"Datamuse API notice: {exc}")
+
+    if definitions:
+        return {
+            "found": True,
+            "word": clean_word,
+            "ipa": ipa or f"/{clean_word}/",
+            "partOfSpeech": ", ".join(pos_list) if pos_list else "Word",
+            "definitions": definitions[:3],
+        }
+
+    return {"found": False, "word": word, "definitions": []}
+
+
+async def lookup_jisho_dictionary(word: str) -> dict[str, Any]:
+    """ADK FunctionTool: Queries Jisho.org free REST API for authentic Japanese-English dictionary definitions and readings."""
+    clean_word = word.strip()
+    if not clean_word:
+        return {"found": False, "word": word, "definitions": []}
+
+    headers = {"User-Agent": DEFAULT_USER_AGENT}
+    try:
+        url = "https://jisho.org/api/v1/search/words"
+        async with httpx.AsyncClient(headers=headers, timeout=4.5) as client:
+            resp = await client.get(url, params={"keyword": clean_word})
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                if data and len(data) > 0:
+                    first = data[0]
+                    jp_info = first.get("japanese", [{}])[0]
+                    reading = jp_info.get("reading") or clean_word
+                    headword = jp_info.get("word") or clean_word
+
+                    senses = first.get("senses", [])
+                    definitions: list[str] = []
+                    pos_list: list[str] = []
+
+                    for s in senses[:3]:
+                        defs = s.get("english_definitions", [])
+                        pos_tags = s.get("parts_of_speech", [])
+                        for p in pos_tags:
+                            if p and p not in pos_list:
+                                pos_list.append(p)
+                        if defs:
+                            definitions.append("; ".join(defs[:3]))
+
+                    romaji = hiragana_to_romaji(reading)
+                    return {
+                        "found": True,
+                        "word": headword,
+                        "reading": reading,
+                        "romaji": romaji,
+                        "partOfSpeech": ", ".join(pos_list[:2]) if pos_list else "名詞",
+                        "definitions": definitions[:3],
+                        "isCommon": first.get("is_common", False),
+                    }
+    except Exception as exc:
+        print(f"Jisho API notice: {exc}")
+
+    return {"found": False, "word": word, "definitions": []}
+
+
+async def lookup_tatoeba_examples(
+    word: str,
+    language: str = "ja",
+    limit: int = 3,
+) -> list[dict[str, str]]:
+    """ADK FunctionTool: Queries Tatoeba.org free open corpus for natural bilingual conversation examples."""
+    clean_word = word.strip()
+    if not clean_word:
+        return []
+
+    from_lang = "jpn" if language == "ja" else "eng"
+    to_lang = "eng" if language == "ja" else "jpn"
+    headers = {"User-Agent": DEFAULT_USER_AGENT}
+
+    examples: list[dict[str, str]] = []
+    try:
+        url = "https://tatoeba.org/en/api_v0/search"
+        async with httpx.AsyncClient(headers=headers, timeout=4.5) as client:
+            resp = await client.get(
+                url,
+                params={"from": from_lang, "to": to_lang, "query": clean_word},
+            )
+            if resp.status_code == 200:
+                results = resp.json().get("results", [])
+                for r in results:
+                    main_text = r.get("text", "").strip()
+                    trans_list = [
+                        t.get("text", "").strip()
+                        for trans in r.get("translations", [])
+                        for t in trans
+                        if t.get("lang") == to_lang and t.get("text")
+                    ]
+                    if main_text and trans_list:
+                        examples.append({
+                            "sentence": main_text,
+                            "translation": trans_list[0],
+                        })
+                    if len(examples) >= limit:
+                        break
+    except Exception as exc:
+        print(f"Tatoeba API notice: {exc}")
+
+    return examples
 
 
 def analyze_japanese_morpheme(word: str, sentence: str = "") -> dict[str, Any]:
@@ -219,3 +345,4 @@ def analyze_japanese_morpheme(word: str, sentence: str = "") -> dict[str, Any]:
         "pos": "名詞",
         "hasKanji": has_kanji(clean),
     }
+

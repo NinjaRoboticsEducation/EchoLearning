@@ -2,9 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   Check,
-  CheckCircle2,
   Edit3,
-  HelpCircle,
   Loader2,
   Mic,
   Play,
@@ -12,7 +10,6 @@ import {
   Repeat,
   Trash2,
   X,
-  XCircle,
 } from 'lucide-react';
 import {
   DiffToken,
@@ -257,8 +254,6 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
           const isSelectedForPractice = selectedSegmentIds.includes(segment.id);
           const isLooping = loopSegmentId === segment.id;
           const isEditingThis = editingSegmentId === segment.id;
-          const hasDiffOverlay =
-            latestDiffTokens.length > 0 && activeDiffSegmentIds.includes(segment.id);
 
           const tokens =
             segment.tokens && segment.tokens.length > 0
@@ -511,76 +506,6 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
                       </button>
                     );
                   })}
-                </div>
-              )}
-
-              {/* Inline Diff Overlay if this segment was evaluated in the latest shadowing session */}
-              {hasDiffOverlay && (
-                <div className="mt-3 pt-2.5 border-t border-slate-200/80">
-                  <div className="text-xs font-medium text-slate-500 mb-1.5">
-                    Latest Shadowing Comparison Overlay:
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                    {latestDiffTokens.map((dt, dIdx) => {
-                      if (dt.status === 'correct') {
-                        return (
-                          <span
-                            key={dIdx}
-                            className="inline-flex items-center gap-1 text-emerald-800 font-medium"
-                          >
-                            <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
-                            <span>{dt.word}</span>
-                          </span>
-                        );
-                      }
-                      if (dt.status === 'omitted') {
-                        return (
-                          <span
-                            key={dIdx}
-                            title={dt.explanation || 'Word was omitted in recording'}
-                            className="inline-flex items-center gap-1 text-red-700 line-through decoration-red-500 font-medium"
-                          >
-                            <XCircle className="w-3 h-3 text-red-600 shrink-0" />
-                            <span>{dt.word} (Omitted)</span>
-                          </span>
-                        );
-                      }
-                      if (dt.status === 'substituted') {
-                        return (
-                          <span
-                            key={dIdx}
-                            title={dt.explanation || 'Pronunciation or word substitution'}
-                            className="inline-flex items-center gap-1 text-amber-800 underline decoration-amber-500 font-medium"
-                          >
-                            <span>
-                              {dt.word}
-                              {dt.expectedWord ? ` → ${dt.expectedWord}` : ''} (Substituted)
-                            </span>
-                          </span>
-                        );
-                      }
-                      if (dt.status === 'stt_uncertain') {
-                        return (
-                          <span
-                            key={dIdx}
-                            title={
-                              dt.explanation ||
-                              'Acoustic signal was close; discrepancy likely due to STT homophone or mic noise'
-                            }
-                            className="inline-flex items-center gap-1 text-slate-600 border-b border-dashed border-slate-400"
-                          >
-                            <HelpCircle className="w-3 h-3 text-slate-500 shrink-0" />
-                            <span>{dt.word} (STT Note)</span>
-                          </span>
-                        );
-                      }
-                      return (
-                        <span key={dIdx} className="text-slate-600">
-                          +{dt.word}
-                        </span>
-                      );
-                    })}
-                  </div>
                 </div>
               )}
             </div>

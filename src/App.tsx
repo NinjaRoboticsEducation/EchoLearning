@@ -549,6 +549,16 @@ export default function App() {
     }
   };
 
+  const handleAdvanceToNextSegment = (): TranscriptSegment | null => {
+    if (!currentVideo || currentVideo.segments.length === 0) return null;
+    const nextIndex = activeSegmentIndex + 1;
+    if (nextIndex < currentVideo.segments.length) {
+      setActiveSegmentIndex(nextIndex);
+      return currentVideo.segments[nextIndex];
+    }
+    return null;
+  };
+
   const handleSaveVocabularyWord = (entry: DictionaryLookupResult) => {
     if (!currentVideo) return;
     const newItem: SavedVocabularyItem = {
@@ -1061,6 +1071,8 @@ export default function App() {
                         onClearLoopSegment={() => setLoopSegment(null)}
                         onSubmitEvaluation={handleEvaluateShadowing}
                         autoPauseTriggerCount={autoPauseTriggerCount}
+                        latestReport={latestReport}
+                        onAdvanceToNextSegment={handleAdvanceToNextSegment}
                       />
                     )}
 

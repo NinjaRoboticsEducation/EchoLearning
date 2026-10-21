@@ -11,6 +11,11 @@ class DictionaryRequest(BaseModel):
     language: LanguageCode = "en"
 
 
+class ConversationExample(BaseModel):
+    sentence: str
+    translation: str
+
+
 class DictionaryLookupResult(BaseModel):
     word: str
     lemma: str
@@ -25,3 +30,4 @@ class DictionaryLookupResult(BaseModel):
     usageExample: str = ""
     usageExampleTranslation: str = ""
     pronunciationTip: str = ""
+    conversationExamples: list[ConversationExample] = Field(default_factory=list)

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ArrowRight,
   Headphones,
   Loader2,
   Mic,
@@ -13,6 +14,7 @@ import {
 } from 'lucide-react';
 import {
   LanguageCode,
+  ShadowingAssessmentReport,
   ShadowingMode,
   TranscriptSegment,
 } from '../types';
@@ -40,6 +42,8 @@ interface ShadowingStudioProps {
     segmentIds: string[];
   }) => void;
   autoPauseTriggerCount: number;
+  latestReport?: ShadowingAssessmentReport | null;
+  onAdvanceToNextSegment?: () => TranscriptSegment | null;
 }
 
 export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
@@ -55,6 +59,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   onClearLoopSegment,
   onSubmitEvaluation,
   autoPauseTriggerCount,
+  latestReport,
+  onAdvanceToNextSegment,
 }) => {
   const [sessionState, setSessionState] = useState<
     | 'idle'
@@ -350,10 +356,25 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     setCapturedSimultaneousSegments(null);
 
     if (mode === 'listen_repeat') {
-      // Step 1: Seek YouTube player to segment start, set single-shot autoPauseAtSec to segment end, and play native audio first
+      let targetSeg = activeSegment;
+      const isCurrentEvaluated = Boolean(
+        latestReport &&
+          latestReport.mode === 'listen_repeat' &&
+          latestReport.segmentIds.includes(activeSegment.id)
+      );
+
+      // If previous take on current sentence was evaluated, advance to the next sentence!
+      if (isCurrentEvaluated && onAdvanceToNextSegment) {
+        const next = onAdvanceToNextSegment();
+        if (next) {
+          targetSeg = next;
+        }
+      }
+
+      // Step 1: Seek YouTube player to target segment start, set single-shot autoPauseAtSec to segment end, and play native audio first
       if (playerHandleRef.current) {
-        onSetAutoPauseAtSec(activeSegment.endTime);
-        playerHandleRef.current.seekTo(activeSegment.startTime, true);
+        onSetAutoPauseAtSec(targetSeg.endTime);
+        playerHandleRef.current.seekTo(targetSeg.startTime, true);
         playerHandleRef.current.play();
         setSessionState('listening_to_model');
       } else {
@@ -707,19 +728,64 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           {sessionState === 'idle' || sessionState === 'recorded_ready' ? (
             <>
-              <button
-                type="button"
-                onClick={handleStartSession}
-                disabled={isEvaluating}
-                className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-              >
-                <Mic className="w-4 h-4" />
-                <span>
-                  {mode === 'listen_repeat'
-                    ? 'Start Listen-Then-Repeat'
-                    : 'Start Simultaneous Shadowing'}
-                </span>
-              </button>
+              {(() => {
+                const isCurrentEvaluated = Boolean(
+                  mode === 'listen_repeat' &&
+                    latestReport &&
+                    latestReport.mode === 'listen_repeat' &&
+                    latestReport.segmentIds.includes(activeSegment.id)
+                );
+                const hasNext = activeSegment.index + 1 < allSegments.length;
+
+                return (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleStartSession}
+                      disabled={isEvaluating}
+                      className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {isCurrentEvaluated && hasNext ? (
+                        <>
+                          <ArrowRight className="w-4 h-4" />
+                          <span>Start Listen-Then-Repeat (Next Sentence)</span>
+                        </>
+                      ) : (
+                        <>
+                          <Mic className="w-4 h-4" />
+                          <span>
+                            {mode === 'listen_repeat'
+                              ? 'Start Listen-Then-Repeat'
+                              : 'Start Simultaneous Shadowing'}
+                          </span>
+                        </>
+                      )}
+                    </button>
+
+                    {isCurrentEvaluated && mode === 'listen_repeat' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMicError(null);
+                          setRecordedAudioUrl(null);
+                          setRecordedBase64(undefined);
+                          if (playerHandleRef.current) {
+                            onSetAutoPauseAtSec(activeSegment.endTime);
+                            playerHandleRef.current.seekTo(activeSegment.startTime, true);
+                            playerHandleRef.current.play();
+                            setSessionState('listening_to_model');
+                          }
+                        }}
+                        disabled={isEvaluating}
+                        className="flex items-center gap-1.5 px-3 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Retry Current Sentence</span>
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
 
               {mode === 'listen_repeat' && (
                 <button

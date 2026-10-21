@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  BookOpen,
   BookmarkCheck,
   BookmarkPlus,
   GripHorizontal,
   Loader2,
+  MessagesSquare,
   Sparkles,
   Volume2,
   X,
@@ -45,7 +47,7 @@ export const DictionaryPopover: React.FC<DictionaryPopoverProps> = ({
   useEffect(() => {
     if (!anchorRect) return;
     const cardWidth = 380;
-    const cardHeight = 320;
+    const cardHeight = 360;
     const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
     const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
 
@@ -139,6 +141,12 @@ export const DictionaryPopover: React.FC<DictionaryPopoverProps> = ({
     }
   };
 
+  const hasGenuinePitchAccent = Boolean(
+    lookupResult?.pitchAccent &&
+      lookupResult.pitchAccent !== 'Standard Accent' &&
+      lookupResult.pitchAccent !== 'Primary Stress'
+  );
+
   return (
     <div
       ref={cardRef}
@@ -148,7 +156,7 @@ export const DictionaryPopover: React.FC<DictionaryPopoverProps> = ({
       }}
       role="dialog"
       aria-label="Floating Contextual Dictionary"
-      className="fixed z-50 w-[360px] sm:w-[390px] max-h-[80vh] overflow-y-auto bg-white/95 backdrop-blur-md border border-slate-300 rounded-xl shadow-2xl p-4 transition-opacity"
+      className="fixed z-50 w-[360px] sm:w-[400px] max-h-[82vh] overflow-y-auto bg-white/95 backdrop-blur-md border border-slate-300 rounded-xl shadow-2xl p-4 transition-opacity"
     >
       {/* Draggable Floating Header Bar */}
       <div
@@ -161,7 +169,7 @@ export const DictionaryPopover: React.FC<DictionaryPopoverProps> = ({
           {lookupResult && (
             <>
               <span aria-hidden="true">·</span>
-              <span>{lookupResult.partOfSpeech}</span>
+              <span className="font-medium text-sky-800">{lookupResult.partOfSpeech}</span>
             </>
           )}
         </div>
@@ -189,7 +197,9 @@ export const DictionaryPopover: React.FC<DictionaryPopoverProps> = ({
           </h3>
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 mt-0.5">
             {lookupResult?.ipa && (
-              <span className="font-mono-tabular">{lookupResult.ipa}</span>
+              <span className="font-mono-tabular text-slate-600 bg-slate-100 px-1 py-0.5 rounded">
+                {lookupResult.ipa}
+              </span>
             )}
             {lookupResult?.romaji && (
               <span className="font-mono-tabular">({lookupResult.romaji})</span>
@@ -244,9 +254,9 @@ export const DictionaryPopover: React.FC<DictionaryPopoverProps> = ({
       </div>
 
       {isLoading && (
-        <div className="py-5 flex items-center justify-center gap-2 text-xs text-slate-500">
+        <div className="py-6 flex items-center justify-center gap-2 text-xs text-slate-500">
           <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
-          <span>Looking up "{selectedWord}" in context...</span>
+          <span>Searching English-Japanese dictionary for "{selectedWord}"...</span>
         </div>
       )}
 
@@ -257,63 +267,96 @@ export const DictionaryPopover: React.FC<DictionaryPopoverProps> = ({
       {ttsError && <div className="mb-2 text-xs text-amber-700">{ttsError}</div>}
 
       {lookupResult && !isLoading && (
-        <div className="space-y-2.5 text-xs">
-          {/* Meaning in Current Sentence */}
-          <div className="p-2.5 bg-sky-50/80 border border-sky-100 rounded-lg">
-            <div className="font-semibold text-sky-950 mb-0.5 flex items-center gap-1">
-              <Sparkles className="w-3.5 h-3.5 text-sky-600" />
-              <span>Meaning in This Sentence</span>
+        <div className="space-y-3 text-xs">
+          {/* English-Japanese Dictionary Definitions */}
+          {lookupResult.dictionaryDefinitions?.length > 0 && (
+            <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-lg">
+              <div className="font-semibold text-slate-800 mb-1.5 flex items-center gap-1.5">
+                <BookOpen className="w-3.5 h-3.5 text-sky-600" />
+                <span>
+                  {lookupResult.language === 'ja'
+                    ? 'English-Japanese Dictionary'
+                    : 'Dictionary Definitions'}
+                </span>
+              </div>
+              <ul className="list-disc list-inside space-y-1 text-slate-700">
+                {lookupResult.dictionaryDefinitions.map((def, i) => (
+                  <li key={i} className="leading-relaxed">
+                    {def}
+                  </li>
+                ))}
+              </ul>
             </div>
-            <p className="text-slate-800 leading-relaxed">
-              {lookupResult.contextualMeaning}
-            </p>
-          </div>
+          )}
 
-          {/* Pitch / Stress & Articulation */}
-          {(lookupResult.pitchAccent || lookupResult.pronunciationTip) && (
-            <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-lg space-y-1">
-              {lookupResult.pitchAccent && (
+          {/* Meaning in Video Context */}
+          {lookupResult.contextualMeaning && (
+            <div className="p-2.5 bg-sky-50/80 border border-sky-100 rounded-lg">
+              <div className="font-semibold text-sky-950 mb-0.5 flex items-center gap-1">
+                <Sparkles className="w-3.5 h-3.5 text-sky-600" />
+                <span>Meaning in This Context</span>
+              </div>
+              <p className="text-slate-800 leading-relaxed">
+                {lookupResult.contextualMeaning}
+              </p>
+            </div>
+          )}
+
+          {/* Conversational Usage Examples */}
+          {lookupResult.conversationExamples && lookupResult.conversationExamples.length > 0 ? (
+            <div className="p-2.5 bg-amber-50/70 border border-amber-200/80 rounded-lg">
+              <div className="font-semibold text-amber-950 mb-1.5 flex items-center gap-1.5">
+                <MessagesSquare className="w-3.5 h-3.5 text-amber-600" />
+                <span>Conversational Examples</span>
+              </div>
+              <div className="space-y-2">
+                {lookupResult.conversationExamples.map((ex, i) => (
+                  <div key={i} className="text-slate-800 pl-1 border-l-2 border-amber-300">
+                    <div className="font-medium text-slate-900 leading-snug">
+                      {ex.sentence}
+                    </div>
+                    <div className="text-[11px] text-slate-600 mt-0.5">
+                      {ex.translation}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : lookupResult.usageExample ? (
+            <div className="p-2.5 bg-amber-50/70 border border-amber-200/80 rounded-lg">
+              <div className="font-semibold text-amber-950 mb-1 flex items-center gap-1.5">
+                <MessagesSquare className="w-3.5 h-3.5 text-amber-600" />
+                <span>Conversational Example</span>
+              </div>
+              <div className="font-medium text-slate-900 leading-snug">
+                {lookupResult.usageExample}
+              </div>
+              {lookupResult.usageExampleTranslation && (
+                <div className="text-[11px] text-slate-600 mt-0.5">
+                  {lookupResult.usageExampleTranslation}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {/* Pitch Accent & Pronunciation Tip (Only when genuine info is present) */}
+          {(hasGenuinePitchAccent || lookupResult.pronunciationTip) && (
+            <div className="p-2 bg-slate-50 border border-slate-200/70 rounded-lg space-y-1 text-[11px]">
+              {hasGenuinePitchAccent && (
                 <div>
                   <span className="text-slate-500 font-medium">
-                    {lookupResult.language === 'ja' ? 'Pitch Accent: ' : 'Stress: '}
+                    {lookupResult.language === 'ja' ? 'Pitch Accent: ' : 'Stress Pattern: '}
                   </span>
-                  <span className="text-slate-900 font-medium">
+                  <span className="text-slate-900 font-semibold">
                     {lookupResult.pitchAccent}
                   </span>
                 </div>
               )}
               {lookupResult.pronunciationTip && (
                 <div className="text-slate-700">
-                  <span className="text-slate-500 font-medium">Tip: </span>
+                  <span className="text-slate-500 font-medium">Pronunciation Tip: </span>
                   {lookupResult.pronunciationTip}
                 </div>
-              )}
-            </div>
-          )}
-
-          {/* Dictionary Definitions */}
-          {lookupResult.dictionaryDefinitions?.length > 0 && (
-            <div>
-              <div className="text-slate-500 font-medium mb-1">
-                Dictionary Definitions
-              </div>
-              <ul className="list-disc list-inside space-y-0.5 text-slate-700">
-                {lookupResult.dictionaryDefinitions.slice(0, 3).map((def, i) => (
-                  <li key={i}>{def}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Example */}
-          {lookupResult.usageExample && (
-            <div className="pt-2 border-t border-slate-100 text-slate-600">
-              <span className="font-medium text-slate-800">Example: </span>
-              <span>{lookupResult.usageExample}</span>
-              {lookupResult.usageExampleTranslation && (
-                <span className="block text-slate-500 mt-0.5">
-                  {lookupResult.usageExampleTranslation}
-                </span>
               )}
             </div>
           )}
@@ -322,3 +365,4 @@ export const DictionaryPopover: React.FC<DictionaryPopoverProps> = ({
     </div>
   );
 };
+
