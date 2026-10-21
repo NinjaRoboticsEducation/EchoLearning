@@ -1,0 +1,6 @@
+{
+  "name": "Echo Language Learning",
+  "description": "Interactive English and Japanese language shadowing application with synchronized YouTube transcripts, inline transcript editing, floating dictionary lookup, Japanese Furigana, and multimodal AI pronunciation assessment.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

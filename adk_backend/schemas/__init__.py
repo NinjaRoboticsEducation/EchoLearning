@@ -1,0 +1,1 @@
+# EchoSense ADK Pydantic Schemas
