@@ -1,5 +1,8 @@
 # EchoSense (Echo Language Learning) — Refined Local Google ADK 2.x Transition Plan
 
+> Historical design/transition document, not current installation instructions or evidence of completed features. For current setup and known limitations, use [the project README](../README.md).
+
+
 **Migrating from Cloud Gemini APIs to a 100% Local AI Stack (`Google ADK 2.x` + `Qwen3.5-9B` + `whisper.cpp` + Native Offline TTS) with Zero UI Changes**
 
 > [!IMPORTANT]

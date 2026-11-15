@@ -1,5 +1,7 @@
 export type LanguageCode = 'en' | 'ja';
 
+export type UiLocale = 'en' | 'ja' | 'zh-Hant' | 'zh-Hans';
+
 export type CaptionSourceType =
   | 'curated_verified'
   | 'youtube_manual'
@@ -41,6 +43,75 @@ export interface VideoMaterial {
   segments: TranscriptSegment[];
 }
 
+export interface SavedMaterial extends VideoMaterial {
+  updatedAt?: string;
+  source?: string;
+}
+
+export interface ModelInfo {
+  id: string;
+  profileId?: string;
+  name: string;
+  displayName?: string;
+  filename?: string;
+  sizeGb: number;
+  tier: string;
+  minRamGb?: number;
+  installed: boolean;
+  active: boolean;
+  recommended: boolean;
+}
+
+export interface ModelsResponse {
+  models: ModelInfo[];
+  activeModelId?: string;
+  activeProfileId?: string;
+  status?: string;
+}
+
+export interface UninstallStatusInfo {
+  scriptPath: string;
+  components: {
+    modelsPresent: boolean;
+    venvPresent: boolean;
+    nodeModulesPresent: boolean;
+    dataPresent: boolean;
+  };
+  commands: {
+    interactive: string;
+    dryRun: string;
+    keepData: string;
+    fullReset: string;
+    completeWithBrew: string;
+  };
+}
+
+export interface SystemStatus {
+  llamaReady: boolean;
+  whisperReady: boolean;
+  sqliteReady?: boolean;
+  activeModel: string;
+  tailscale: {
+    installed: boolean;
+    running: boolean;
+    ip: string;
+    hostname: string;
+    enabled?: boolean;
+  };
+  mcp: {
+    stdioCommand: string;
+    httpEndpoint: string;
+    httpEnabled: boolean;
+    stdioEnabled: boolean;
+  };
+  counts?: {
+    materials: number;
+    vocabulary: number;
+    history: number;
+  };
+  uninstall?: UninstallStatusInfo;
+}
+
 export interface DictionaryLookupResult {
   word: string;
   lemma: string;
@@ -56,7 +127,12 @@ export interface DictionaryLookupResult {
   usageExampleTranslation: string;
   pronunciationTip: string;
   conversationExamples?: Array<{ sentence: string; translation: string }>;
+  isDegraded?: boolean;
+  source?: 'adk_agent' | 'online_fallback' | 'offline_fallback' | string;
+  modelProfileId?: string;
 }
+
+export type DictionaryEntry = DictionaryLookupResult;
 
 export type DiffTokenStatus =
   | 'correct'
@@ -84,17 +160,27 @@ export interface PhonemeFeedbackItem {
 
 export type ShadowingMode = 'listen_repeat' | 'simultaneous';
 
+export interface TranscribePreviewResult {
+  recognizedText: string;
+  isSilent: boolean;
+  durationSec: number;
+  rmsDb: number;
+  pauseCount: number;
+  silenceRatio: number;
+  pitchContour?: number[];
+}
+
 export interface ShadowingAssessmentReport {
   id: string;
   videoId: string;
   videoTitle: string;
+  channel?: string;
   language: LanguageCode;
   segmentIds: string[];
   mode: ShadowingMode;
   createdAt: string;
   targetText: string;
   recognizedTranscript: string;
-  webSpeechTranscript?: string;
   overallScore: number;
   dimensions: {
     contentAccuracy: number; // Objective lexical match (0-100)
@@ -118,7 +204,21 @@ export interface ShadowingAssessmentReport {
   improvementSuggestions: string[];
   recommendedRetryText?: string;
   audioDataUrl?: string;
+  audioUrl?: string;
+  recordingId?: string;
+  pronunciationScore?: number;
+  prosodyScore?: number;
+  accuracyScore?: number;
+  fluencyScore?: number;
+  pitchContour?: number[];
+  referencePitchContour?: number[];
+  energyDb?: number;
+  speechRateWpm?: number;
+  isDemo?: boolean;
+  analysisMethod?: string;
 }
+
+export type ShadowingResult = ShadowingAssessmentReport;
 
 export interface SavedVocabularyItem {
   id: string;

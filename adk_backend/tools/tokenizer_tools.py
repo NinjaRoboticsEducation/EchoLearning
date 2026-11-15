@@ -1,4 +1,5 @@
 import re
+import sys
 from typing import Any
 
 import fugashi
@@ -79,7 +80,7 @@ def tokenize_sentence(text: str, language: str = "ja") -> list[dict[str, Any]]:
                 )
             return tokens
         except Exception as exc:
-            print(f"fugashi tokenization warning: {exc}")
+            print(f"fugashi tokenization warning: {exc}", file=sys.stderr)
 
     # English or fallback tokenization (preserves punctuation tokens for reader)
     return [

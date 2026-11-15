@@ -33,6 +33,7 @@ interface YouTubePlayerProps {
   playbackRate: number;
   loopSegment: { startTime: number; endTime: number } | null;
   autoPauseAtSec: number | null;
+  activeSegmentStartTime?: number;
   onTimeUpdate: (timeSec: number) => void;
   onPlayStateChange: (playing: boolean) => void;
   onPlaybackRateChange: (rate: number) => void;
@@ -40,6 +41,7 @@ interface YouTubePlayerProps {
   onPrevSegment: () => void;
   onNextSegment: () => void;
   onAutoPauseReached?: () => void;
+  onVideoEnded?: () => void;
   playerRefOut: React.MutableRefObject<YouTubePlayerHandle | null>;
 }
 
@@ -52,12 +54,18 @@ function loadYouTubeIframeApi(): Promise<void> {
   if (ytApiPromise) {
     return ytApiPromise;
   }
-  ytApiPromise = new Promise<void>((resolve) => {
+  ytApiPromise = new Promise<void>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      ytApiPromise = null;
+      reject(new Error('YouTube Player API timed out.'));
+    }, 10000);
+
     const existingScript = document.querySelector(
       'script[src="https://www.youtube.com/iframe_api"]'
     );
     const prevCallback = window.onYouTubeIframeAPIReady;
     window.onYouTubeIframeAPIReady = () => {
+      window.clearTimeout(timeoutId);
       if (prevCallback) prevCallback();
       resolve();
     };
@@ -65,6 +73,11 @@ function loadYouTubeIframeApi(): Promise<void> {
       const tag = document.createElement('script');
       tag.src = 'https://www.youtube.com/iframe_api';
       tag.async = true;
+      tag.onerror = () => {
+        window.clearTimeout(timeoutId);
+        ytApiPromise = null;
+        reject(new Error('Failed to load YouTube Player API.'));
+      };
       document.head.appendChild(tag);
     }
   });
@@ -89,6 +102,7 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
   playbackRate,
   loopSegment,
   autoPauseAtSec,
+  activeSegmentStartTime,
   onTimeUpdate,
   onPlayStateChange,
   onPlaybackRateChange,
@@ -96,6 +110,7 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
   onPrevSegment,
   onNextSegment,
   onAutoPauseReached,
+  onVideoEnded,
   playerRefOut,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -108,7 +123,6 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
 
-  // Keep latest callbacks in refs so the 80ms sync interval always sees current props
   const loopSegmentRef = useRef(loopSegment);
   loopSegmentRef.current = loopSegment;
 
@@ -126,105 +140,128 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
   const onAutoPauseReachedRef = useRef(onAutoPauseReached);
   onAutoPauseReachedRef.current = onAutoPauseReached;
 
+  const onVideoEndedRef = useRef(onVideoEnded);
+  onVideoEndedRef.current = onVideoEnded;
+
   useEffect(() => {
     let isMounted = true;
     setPlayerError(null);
+    setIsReady(false);
 
-    loadYouTubeIframeApi().then(() => {
-      if (!isMounted || !containerRef.current) return;
+    loadYouTubeIframeApi()
+      .then(() => {
+        if (!isMounted || !containerRef.current) return;
 
-      if (
-        ytPlayerRef.current &&
-        typeof ytPlayerRef.current.loadVideoById === 'function'
-      ) {
-        if (loadedVideoIdRef.current !== videoId) {
-          loadedVideoIdRef.current = videoId;
-          ytPlayerRef.current.cueVideoById(videoId);
+        if (
+          ytPlayerRef.current &&
+          typeof ytPlayerRef.current.loadVideoById === 'function'
+        ) {
+          if (loadedVideoIdRef.current !== videoId) {
+            loadedVideoIdRef.current = videoId;
+            ytPlayerRef.current.cueVideoById(videoId);
+          }
+          return;
         }
-        return;
-      }
 
-      loadedVideoIdRef.current = videoId;
-      ytPlayerRef.current = new window.YT.Player(containerRef.current, {
-        videoId,
-        width: '100%',
-        height: '100%',
-        playerVars: {
-          autoplay: 0,
-          controls: 1,
-          rel: 0,
-          modestbranding: 1,
-          playsinline: 1,
-          cc_load_policy: 0,
-        },
-        events: {
-          onReady: (event: any) => {
-            if (!isMounted) return;
-            setIsReady(true);
-            setRates(event.target.getAvailablePlaybackRates?.() ?? [1]);
-            onPlaybackRateChange(event.target.getPlaybackRate?.() ?? 1);
-            playerRefOut.current = {
-              seekTo: (seconds: number, allowSeekAhead = true) => {
-                if (ytPlayerRef.current?.seekTo) {
-                  ytPlayerRef.current.seekTo(seconds, allowSeekAhead);
-                  lastReportedTimeRef.current = seconds;
-                  onTimeUpdateRef.current(seconds);
-                }
-              },
-              play: () => {
-                ytPlayerRef.current?.playVideo?.();
-              },
-              pause: () => {
-                ytPlayerRef.current?.pauseVideo?.();
-              },
-              getCurrentTime: () => {
-                return ytPlayerRef.current?.getCurrentTime?.() || 0;
-              },
-              getDuration: () => {
-                return ytPlayerRef.current?.getDuration?.() || 0;
-              },
-              setPlaybackRate: (rate: number) => {
-                ytPlayerRef.current?.setPlaybackRate?.(rate);
-              },
-            };
+        loadedVideoIdRef.current = videoId;
+        ytPlayerRef.current = new window.YT.Player(containerRef.current, {
+          videoId,
+          width: '100%',
+          height: '100%',
+          playerVars: {
+            autoplay: 0,
+            controls: 1,
+            rel: 0,
+            modestbranding: 1,
+            playsinline: 1,
+            cc_load_policy: 0,
           },
-          onPlaybackRateChange: (event: any) => {
-            if (isMounted) onPlaybackRateChange(event.data);
-          },
-          onStateChange: (event: any) => {
-            if (!isMounted) return;
-            const YTState = window.YT?.PlayerState;
-            if (!YTState) return;
-            if (event.data === YTState.CUED || event.data === YTState.PLAYING) {
+          events: {
+            onReady: (event: any) => {
+              if (!isMounted) return;
+              setIsReady(true);
               setRates(event.target.getAvailablePlaybackRates?.() ?? [1]);
               onPlaybackRateChange(event.target.getPlaybackRate?.() ?? 1);
-            }
-            if (event.data === YTState.PLAYING) {
-              onPlayStateChangeRef.current(true);
-            } else if (
-              event.data === YTState.PAUSED ||
-              event.data === YTState.ENDED ||
-              event.data === YTState.CUED
-            ) {
-              onPlayStateChangeRef.current(false);
-            }
+              playerRefOut.current = {
+                seekTo: (seconds: number, allowSeekAhead = true) => {
+                  if (ytPlayerRef.current?.seekTo) {
+                    ytPlayerRef.current.seekTo(seconds, allowSeekAhead);
+                    lastReportedTimeRef.current = seconds;
+                    onTimeUpdateRef.current(seconds);
+                  }
+                },
+                play: () => {
+                  ytPlayerRef.current?.playVideo?.();
+                },
+                pause: () => {
+                  ytPlayerRef.current?.pauseVideo?.();
+                },
+                getCurrentTime: () => {
+                  return ytPlayerRef.current?.getCurrentTime?.() || 0;
+                },
+                getDuration: () => {
+                  return ytPlayerRef.current?.getDuration?.() || 0;
+                },
+                setPlaybackRate: (rate: number) => {
+                  ytPlayerRef.current?.setPlaybackRate?.(rate);
+                },
+              };
+            },
+            onPlaybackRateChange: (event: any) => {
+              if (isMounted) onPlaybackRateChange(event.data);
+            },
+            onStateChange: (event: any) => {
+              if (!isMounted) return;
+              const YTState = window.YT?.PlayerState;
+              if (!YTState) return;
+              if (event.data === YTState.CUED || event.data === YTState.PLAYING) {
+                setRates(event.target.getAvailablePlaybackRates?.() ?? [1]);
+                onPlaybackRateChange(event.target.getPlaybackRate?.() ?? 1);
+              }
+              if (event.data === YTState.PLAYING) {
+                onPlayStateChangeRef.current(true);
+              } else if (event.data === YTState.ENDED) {
+                onPlayStateChangeRef.current(false);
+                if (onVideoEndedRef.current) {
+                  onVideoEndedRef.current();
+                }
+              } else if (
+                event.data === YTState.PAUSED ||
+                event.data === YTState.CUED
+              ) {
+                onPlayStateChangeRef.current(false);
+              }
+            },
+            onError: () => {
+              if (!isMounted) return;
+              setPlayerError(
+                'This YouTube video restricts embedded playback or is unavailable. You can still use the interactive transcript, dictionary, and shadowing recorder below.'
+              );
+            },
           },
-          onError: () => {
-            if (!isMounted) return;
-            setPlayerError(
-              'This YouTube video restricts embedded playback or is unavailable. You can still use the interactive transcript, dictionary, and shadowing recorder below.'
-            );
-          },
-        },
+        });
+      })
+      .catch(() => {
+        if (!isMounted) return;
+        setPlayerError(
+          'YouTube embed player could not be loaded (offline or blocked). You can still use the interactive transcript, dictionary, and shadowing recorder below.'
+        );
       });
-    });
 
     return () => {
       isMounted = false;
+      playerRefOut.current = null;
+      if (ytPlayerRef.current && typeof ytPlayerRef.current.destroy === 'function') {
+        try {
+          ytPlayerRef.current.destroy();
+        } catch {
+          // Ignore cleanup errors
+        }
+        ytPlayerRef.current = null;
+      }
     };
   }, [videoId]);
 
-  // High-precision 80ms polling interval for sentence sync, A-B loop, and single-shot Listen-Then-Repeat auto-pause
   useEffect(() => {
     if (!isReady) return;
     const interval = window.setInterval(() => {
@@ -234,18 +271,15 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
       if (state === window.YT?.PlayerState?.PLAYING) {
         const t = player.getCurrentTime();
         if (typeof t === 'number' && !Number.isNaN(t)) {
-          // Only trigger React state update when playback time changes by >= 0.16s to keep continuous playback silky-smooth
           if (Math.abs(t - lastReportedTimeRef.current) >= 0.16) {
             lastReportedTimeRef.current = t;
             onTimeUpdateRef.current(t);
           }
 
-          // Check single-shot Listen-Then-Repeat auto-pause boundary
           if (
             autoPauseRef.current !== null &&
             t >= autoPauseRef.current - 0.08
           ) {
-            // Immediately consume & clear autoPauseRef so it NEVER repeatedly pauses continuous playback!
             autoPauseRef.current = null;
             player.pauseVideo();
             onPlayStateChangeRef.current(false);
@@ -255,7 +289,6 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
             return;
           }
 
-          // Check A-B segment loop boundary
           if (
             loopSegmentRef.current &&
             t >= loopSegmentRef.current.endTime - 0.05
@@ -277,7 +310,6 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
     if (isPlaying) {
       player.pauseVideo();
     } else {
-      // Clear any leftover single-shot auto-pause when user manually plays
       autoPauseRef.current = null;
       player.playVideo();
     }
@@ -288,6 +320,8 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
     if (!player || !isReady) return;
     const targetTime = loopSegment
       ? loopSegment.startTime
+      : typeof activeSegmentStartTime === 'number'
+      ? activeSegmentStartTime
       : Math.max(0, currentTime - 4);
     player.seekTo(targetTime, true);
     player.playVideo();
@@ -311,27 +345,27 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
     ytPlayerRef.current?.setPlaybackRate?.(rate);
   };
 
-
   return (
-    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden min-w-0">
       {/* 16:9 Embedded Video Container */}
       <div className="relative aspect-video w-full bg-slate-950">
         <div ref={containerRef} className="w-full h-full" />
         {playerError && (
-          <div className="absolute inset-0 bg-slate-900/90 flex items-center justify-center p-6 text-center">
-            <p className="text-sm text-slate-200 max-w-md">{playerError}</p>
+          <div className="absolute inset-0 bg-slate-900/90 flex items-center justify-center p-4 sm:p-6 text-center">
+            <p className="text-xs sm:text-sm text-slate-200 max-w-md">{playerError}</p>
           </div>
         )}
       </div>
 
-      {/* Synchronized Transport & Loop Deck */}
-      <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5">
+      {/* Synchronized Transport & Loop Deck (U01: wraps cleanly at 320px-599px) */}
+      <div className="px-3 sm:px-4 py-3 bg-[#151925] border-t border-[#525a6d] flex flex-wrap items-center justify-between gap-2.5 min-w-0">
+        <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full">
           <button
             type="button"
             onClick={onPrevSegment}
             title="Previous Sentence Segment"
-            className="p-2 text-slate-700 hover:text-slate-950 hover:bg-slate-200/70 rounded-lg transition-colors cursor-pointer"
+            aria-label="Previous Sentence Segment"
+            className="p-2 text-[#b8c1d4] hover:text-[#eef1fa] hover:bg-[#332b57] rounded-lg transition-colors cursor-pointer shrink-0"
           >
             <SkipBack className="w-4 h-4" />
           </button>
@@ -339,21 +373,22 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
           <button
             type="button"
             onClick={handleTogglePlay}
-            className="flex items-center gap-2 px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[#c3bbff] hover:bg-[#d5cfff] text-[#151925] text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {isPlaying ? (
               <Pause className="w-3.5 h-3.5" />
             ) : (
               <Play className="w-3.5 h-3.5" />
             )}
-            <span>{isPlaying ? 'Pause Video' : 'Play Video'}</span>
+            <span>{isPlaying ? 'Pause' : 'Play'}</span>
           </button>
 
           <button
             type="button"
             onClick={onNextSegment}
             title="Next Sentence Segment"
-            className="p-2 text-slate-700 hover:text-slate-950 hover:bg-slate-200/70 rounded-lg transition-colors cursor-pointer"
+            aria-label="Next Sentence Segment"
+            className="p-2 text-[#b8c1d4] hover:text-[#eef1fa] hover:bg-[#332b57] rounded-lg transition-colors cursor-pointer shrink-0"
           >
             <SkipForward className="w-4 h-4" />
           </button>
@@ -362,7 +397,7 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
             type="button"
             onClick={handleReplaySegment}
             title="Replay Current Segment"
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-200/70 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#b8c1d4] hover:text-[#eef1fa] hover:bg-[#332b57] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             <span>Replay</span>
@@ -371,38 +406,43 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
           <button
             type="button"
             onClick={onToggleLoopSegment}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            aria-pressed={Boolean(loopSegment)}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               loopSegment
-                ? 'bg-sky-100 text-sky-900 border border-sky-300'
-                : 'text-slate-700 hover:text-slate-950 hover:bg-slate-200/70'
+                ? 'bg-[#c3bbff] text-[#151925] border border-[#c3bbff]'
+                : 'text-[#b8c1d4] hover:text-[#eef1fa] hover:bg-[#332b57]'
             }`}
           >
             <Repeat className="w-3.5 h-3.5" />
-            <span>{loopSegment ? 'Looping Segment' : 'Loop Segment'}</span>
+            <span>{loopSegment ? 'Looping' : 'Loop'}</span>
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
-          {/* Timestamp Readout */}
-          <div className="text-xs font-mono-tabular text-slate-600">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0 max-w-full">
+          <div className="text-xs font-mono-tabular text-[#b8c1d4] shrink-0">
             <span>{formatTimestamp(currentTime)}</span>
           </div>
 
-          <span className="text-slate-300" aria-hidden="true">
+          <span className="text-[#525a6d] hidden sm:inline" aria-hidden="true">
             ·
           </span>
 
           {/* Speed Control */}
-          <div className="flex items-center gap-1 bg-slate-200/70 p-0.5 rounded-lg">
+          <div
+            className="flex flex-wrap items-center gap-1 bg-[#1e2331] border border-[#525a6d] p-0.5 rounded-lg max-w-full"
+            role="group"
+            aria-label="Playback speed"
+          >
             {rates.map((r) => (
               <button
                 key={r}
                 type="button"
+                aria-pressed={Math.abs(playbackRate - r) < 0.01}
                 onClick={() => handleRateChange(r)}
                 className={`px-2 py-1 text-xs font-mono-tabular rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   Math.abs(playbackRate - r) < 0.01
-                    ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
+                    ? 'bg-[#332b57] text-[#eef1fa] font-semibold border border-[#c3bbff]/50'
+                    : 'text-[#b8c1d4] hover:text-[#eef1fa]'
                 }`}
               >
                 {r}x
@@ -413,15 +453,17 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
           <button
             type="button"
             onClick={handleToggleMute}
+            aria-pressed={isMuted}
+            aria-label={isMuted ? 'Unmute Video' : 'Mute Video'}
             title={
               isMuted
                 ? 'Unmute Video'
                 : 'Mute Video (For Quiet Shadowing)'
             }
-            className="p-1.5 text-slate-600 hover:text-slate-900 rounded-lg transition-colors cursor-pointer"
+            className="p-1.5 text-[#b8c1d4] hover:text-[#eef1fa] rounded-lg transition-colors cursor-pointer shrink-0"
           >
             {isMuted ? (
-              <VolumeX className="w-4 h-4 text-amber-600" />
+              <VolumeX className="w-4 h-4 text-amber-400" />
             ) : (
               <Volume2 className="w-4 h-4" />
             )}

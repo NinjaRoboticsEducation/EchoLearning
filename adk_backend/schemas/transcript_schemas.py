@@ -36,19 +36,28 @@ class TranscriptSegment(BaseModel):
 class VideoMaterial(BaseModel):
     videoId: str
     title: str
-    channel: str
+    channel: str = ""
     language: LanguageCode
     level: str = "Intermediate"
-    durationSec: float
+    durationSec: float = 0.0
     captionSource: CaptionSourceType = "youtube_manual"
     captionNote: str = "Extracted captions"
     description: str | None = None
+    source: str | None = None
+    updatedAt: str | None = None
     segments: list[TranscriptSegment] = Field(default_factory=list)
 
 
+class SegmentUpdateRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=10000)
+    tokens: list[WordToken] | None = None
+
+
 class RetokenizeRequest(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=20000)
     language: LanguageCode = "ja"
+    videoId: str | None = None
+    segmentId: str | None = None
 
 
 class RetokenizeResponse(BaseModel):
@@ -56,6 +65,6 @@ class RetokenizeResponse(BaseModel):
 
 
 class FetchTranscriptRequest(BaseModel):
-    urlOrId: str
+    urlOrId: str = Field(min_length=1, max_length=512)
     preferredLanguage: LanguageCode | None = None
     stream: bool = True

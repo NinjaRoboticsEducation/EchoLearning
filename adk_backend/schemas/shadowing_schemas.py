@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -10,6 +10,7 @@ DiffTokenStatus = Literal[
     "substituted",
     "inserted",
     "stt_uncertain",
+    "missing",
 ]
 SeverityLevel = Literal["high", "medium", "low"]
 
@@ -58,19 +59,40 @@ class ShadowingAssessmentReport(BaseModel):
     mode: ShadowingMode = "listen_repeat"
     createdAt: str | None = None
     targetText: str
-    recognizedTranscript: str
+    recognizedTranscript: str = ""
+    recognizedText: str | None = None
     webSpeechTranscript: str | None = None
     overallScore: float = 0.0
+    accuracyScore: float | None = None
+    fluencyScore: float | None = None
+    rhythmScore: float | None = None
+    intonationScore: float | None = None
+    pronunciationScore: float | None = None
+    prosodyScore: float | None = None
+    pitchContour: list[float] | None = None
+    referencePitchContour: list[float] | None = None
+    energyDb: float | None = None
+    speechRateWpm: float | None = None
+    recordingId: str | None = None
     dimensions: AssessmentDimensions = Field(default_factory=AssessmentDimensions)
     metrics: AssessmentMetrics | None = None
     speechRateValue: float = 120.0
     targetRateValue: float = 135.0
     scoreExplanation: str = ""
+    feedback: str | None = None
+    intonationTips: list[str] | None = None
+    actionableImprovements: list[str] | None = None
     wordDiff: list[DiffToken] = Field(default_factory=list)
+    wordAnalysis: list[dict[str, Any]] | None = None
     pronunciationFeedback: list[PhonemeFeedbackItem] = Field(default_factory=list)
     improvementSuggestions: list[str] = Field(default_factory=list)
     recommendedRetryText: str | None = None
     audioDataUrl: str | None = None
+    isDemo: bool = False
+    status: str | None = None
+
+
+ShadowingScoreResponse = ShadowingAssessmentReport
 
 
 class ShadowingEvaluateRequest(BaseModel):

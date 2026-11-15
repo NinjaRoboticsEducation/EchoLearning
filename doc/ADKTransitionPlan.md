@@ -1,5 +1,8 @@
 # EchoSense — Local ADK Transition Plan
 
+> Historical design/transition document, not current installation instructions or evidence of completed features. For current setup and known limitations, use [the project README](../README.md).
+
+
 **Transitioning from Cloud Gemini to Local AI with Google ADK 2.x, Qwen3.5-9B & Whisper**
 
 > [!NOTE]

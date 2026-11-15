@@ -4,6 +4,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+NON_INTERACTIVE_FLAG=""
+MODELS_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --non-interactive|--default)
+      NON_INTERACTIVE_FLAG="--non-interactive"
+      shift
+      ;;
+    --models)
+      MODELS_ARGS=("--models" "${2:-}")
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
 echo "================================================================================"
 echo "  Echo Language Learning — Automated Environment Setup"
 echo "  Google ADK 2.x + Local AI Architecture (macOS)"
@@ -52,6 +71,15 @@ else
   echo "✓ Node $NODE_VER is installed"
 fi
 
+# Verify Node >= 20.19.0 for Vite
+if ! node -e '
+  const [maj, min] = process.versions.node.split(".").map(Number);
+  if (maj < 20 || (maj === 20 && min < 19)) process.exit(1);
+'; then
+  echo "❌ Node.js $(node -v) is too old. Vite requires Node >= 20.19.0." >&2
+  exit 1
+fi
+
 # 4. Check llama.cpp and whisper.cpp binaries
 if command -v llama-server >/dev/null 2>&1 || [ -x "/usr/local/bin/llama-server" ] || [ -x "/opt/homebrew/bin/llama-server" ]; then
   echo "✓ llama-server executable located"
@@ -63,7 +91,7 @@ fi
 if command -v whisper-server >/dev/null 2>&1 || [ -x "/usr/local/bin/whisper-server" ] || [ -x "/opt/homebrew/bin/whisper-server" ]; then
   echo "✓ whisper-server executable located"
 else
-  echo "whisper-server not found in standard path. Attempting brew install whisper-cpp..."
+  echo "Installing whisper-cpp via brew..."
   brew install whisper-cpp
 fi
 
@@ -80,7 +108,6 @@ fi
 echo "Updating pip and installing certifi Root CA certificates..."
 "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel certifi
 
-# Fix macOS Python SSL certificate verify issue
 CERT_PATH="$("$VENV_DIR/bin/python" -m certifi)"
 echo "✓ CA Certificates verified at: $CERT_PATH"
 
@@ -103,12 +130,19 @@ mkdir -p "$PROJECT_ROOT/models"
 chmod +x "$PROJECT_ROOT/scripts/"*.sh
 
 if [[ "${ECHO_SETUP_RUNTIME_ONLY:-0}" != 1 ]]; then
-  "$SCRIPT_DIR/download_models.sh"
+  dl_args=()
+  if [[ -n "$NON_INTERACTIVE_FLAG" ]]; then
+    dl_args+=("$NON_INTERACTIVE_FLAG")
+  fi
+  if [[ ${#MODELS_ARGS[@]} -gt 0 ]]; then
+    dl_args+=("${MODELS_ARGS[@]}")
+  fi
+  "$SCRIPT_DIR/download_models.sh" "${dl_args[@]}"
 fi
 printf '%s\n' "$PROJECT_ROOT" > "$VENV_DIR/.echo-location"
 
-# 8. Setup runtime directories
-mkdir -p "$PROJECT_ROOT/.pids" "$PROJECT_ROOT/logs"
+# 8. Setup runtime & durable data directories
+mkdir -p "$PROJECT_ROOT/.pids" "$PROJECT_ROOT/logs" "$PROJECT_ROOT/data/audio"
 
 echo ""
 echo "================================================================================"

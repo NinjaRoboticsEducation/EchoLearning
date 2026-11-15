@@ -6,8 +6,8 @@ LanguageCode = Literal["en", "ja"]
 
 
 class DictionaryRequest(BaseModel):
-    word: str
-    sentence: str = ""
+    word: str = Field(min_length=1, max_length=256)
+    sentence: str = Field(default="", max_length=2000)
     language: LanguageCode = "en"
 
 
@@ -31,3 +31,9 @@ class DictionaryLookupResult(BaseModel):
     usageExampleTranslation: str = ""
     pronunciationTip: str = ""
     conversationExamples: list[ConversationExample] = Field(default_factory=list)
+    isDegraded: bool = False
+    source: str | None = None
+    modelProfileId: str | None = None
+
+
+DictionaryEntry = DictionaryLookupResult

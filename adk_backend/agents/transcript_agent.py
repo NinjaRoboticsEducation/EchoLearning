@@ -1,4 +1,5 @@
 import re
+import sys
 from typing import Any
 
 from google.adk.agents import LlmAgent
@@ -46,7 +47,7 @@ async def estimate_transcript_level(
         if level in ("Beginner", "Intermediate", "Advanced"):
             return level
     except Exception as exc:
-        print(f"estimate_transcript_level fallback: {exc}")
+        print(f"estimate_transcript_level fallback: {exc}", file=sys.stderr)
 
     # Deterministic heuristic fallback based on average sentence/word length
     words = sample_text.split() if language == "en" else list(sample_text)

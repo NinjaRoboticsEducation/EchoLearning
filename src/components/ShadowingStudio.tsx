@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowRight,
+  CheckCircle2,
   Headphones,
   Loader2,
   Mic,
@@ -11,18 +13,55 @@ import {
   Sparkles,
   Square,
   Volume2,
+  X,
 } from 'lucide-react';
 import {
+  DiffToken,
   LanguageCode,
   ShadowingAssessmentReport,
   ShadowingMode,
+  TranscribePreviewResult,
   TranscriptSegment,
 } from '../types';
+import { blobToBase64, encodeWav16kMono } from '../utils/audio';
 import { formatTimestamp, YouTubePlayerHandle } from './YouTubePlayer';
 
+export type RecordingSessionState =
+  | 'idle'
+  | 'permission'
+  | 'listening'
+  | 'recording'
+  | 'paused'
+  | 'finalizing'
+  | 'ready'
+  | 'analyzing'
+  | 'reviewed';
+
+export interface TakeSnapshot {
+  targetText: string;
+  segmentIds: string[];
+  targetDurationSec: number;
+  mode: ShadowingMode;
+  language: LanguageCode;
+  startSec: number;
+  endSec: number;
+}
+
+export interface S05PreviewState {
+  sessionState: RecordingSessionState;
+  preview: TranscribePreviewResult | null;
+  recordedAudioUrl: string | null;
+  takeSnapshot: TakeSnapshot | null;
+  finalizeError: string | null;
+}
+
 interface ShadowingStudioProps {
+  videoId: string;
+  videoTitle: string;
+  channel: string;
   language: LanguageCode;
   mode: ShadowingMode;
+  showFurigana?: boolean;
   allSegments: TranscriptSegment[];
   targetSegments: TranscriptSegment[];
   activeSegment: TranscriptSegment;
@@ -31,25 +70,148 @@ interface ShadowingStudioProps {
   onModeChange: (mode: ShadowingMode) => void;
   onSetAutoPauseAtSec: (sec: number | null) => void;
   onClearLoopSegment: () => void;
-  onSubmitEvaluation: (payload: {
-    audioBase64?: string;
-    mimeType?: string;
-    audioDataUrl?: string;
-    webSpeechTranscript: string;
-    durationSec: number;
-    targetDurationSec: number;
-    targetText: string;
-    segmentIds: string[];
-  }) => void;
+  onReportGenerated: (report: ShadowingAssessmentReport) => void;
+  onPreviewStateChange?: (state: S05PreviewState) => void;
+  onBusyStateChange?: (busy: boolean) => void;
+  onEvaluationError?: (error: string | null) => void;
   autoPauseTriggerCount: number;
+  videoEndedCount?: number;
   latestReport?: ShadowingAssessmentReport | null;
   onAdvanceToNextSegment?: () => TranscriptSegment | null;
   onAdvanceToSegmentIndex?: (index: number) => TranscriptSegment | null;
+  triggerAnalyzeRef?: React.MutableRefObject<(() => void) | null>;
+  triggerRecordAgainRef?: React.MutableRefObject<(() => void) | null>;
+}
+
+const MAX_RECORDING_SEC = 595;
+
+function normalizeReportFromAnalyzeApi(
+  data: Record<string, any>,
+  snapshot: TakeSnapshot,
+  videoId: string,
+  videoTitle: string,
+  channel: string,
+  durationSec: number,
+  audioDataUrl?: string
+): ShadowingAssessmentReport {
+  const rawDiff: any[] = Array.isArray(data.wordDiff)
+    ? data.wordDiff
+    : Array.isArray(data.wordAnalysis)
+    ? data.wordAnalysis
+    : [];
+
+  const wordDiff: DiffToken[] = rawDiff.map((t) => ({
+    word: String(t.word ?? t.surface ?? ''),
+    expectedWord: t.expectedWord ?? t.expected ?? undefined,
+    reading: t.reading ?? undefined,
+    status: t.status || 'correct',
+    explanation: t.explanation ?? undefined,
+  }));
+
+  const omittedCount = wordDiff.filter((t) => t.status === 'omitted').length;
+  const substitutedCount = wordDiff.filter((t) => t.status === 'substituted').length;
+  const uncertainSttCount = wordDiff.filter((t) => t.status === 'stt_uncertain').length;
+
+  const contentAccuracy = Number(
+    data.dimensions?.contentAccuracy ?? data.accuracyScore ?? 0
+  );
+  const pronunciation = Number(
+    data.dimensions?.pronunciation ?? data.pronunciationScore ?? 0
+  );
+  const fluency = Number(
+    data.dimensions?.fluency ?? data.fluencyScore ?? 0
+  );
+  const prosody = Number(
+    data.dimensions?.prosody ?? data.prosodyScore ?? data.intonationScore ?? 0
+  );
+
+  const recordingId: string | undefined = data.recordingId || undefined;
+  const speechRateWpm = Number(
+    data.speechRateWpm ?? data.metrics?.speechRateValue ?? data.speechRateValue ?? 0
+  );
+
+  return {
+    id: data.id || `rep-${Date.now()}`,
+    videoId,
+    videoTitle,
+    channel,
+    language: snapshot.language,
+    segmentIds: snapshot.segmentIds,
+    mode: snapshot.mode,
+    createdAt: data.createdAt || new Date().toISOString(),
+    targetText: snapshot.targetText,
+    recognizedTranscript:
+      data.recognizedTranscript ?? data.recognizedText ?? '',
+    overallScore: Number(data.overallScore ?? 0),
+    dimensions: {
+      contentAccuracy,
+      pronunciation,
+      fluency,
+      prosody,
+    },
+    metrics: {
+      speechRateValue: speechRateWpm,
+      speechRateUnit: snapshot.language === 'ja' ? 'Moras/min' : 'WPM',
+      targetRateValue: Number(data.metrics?.targetRateValue ?? data.targetRateValue ?? 135),
+      durationSec: Number(data.metrics?.durationSec ?? durationSec),
+      targetDurationSec: Number(
+        data.metrics?.targetDurationSec ?? snapshot.targetDurationSec
+      ),
+      omittedCount: Number(data.metrics?.omittedCount ?? omittedCount),
+      substitutedCount: Number(data.metrics?.substitutedCount ?? substitutedCount),
+      uncertainSttCount: Number(data.metrics?.uncertainSttCount ?? uncertainSttCount),
+    },
+    scoreExplanation:
+      data.scoreExplanation ||
+      data.feedback ||
+      'Evaluated across lexical accuracy, acoustic pronunciation, fluency, and prosodic rhythm.',
+    wordDiff,
+    pronunciationFeedback: Array.isArray(data.pronunciationFeedback)
+      ? data.pronunciationFeedback
+      : Array.isArray(data.intonationTips)
+      ? data.intonationTips.map((tip: any) =>
+          typeof tip === 'string'
+            ? {
+                targetWord: 'Intonation',
+                readingOrIpa: '',
+                category: 'Prosody & Rhythm',
+                observedIssue: tip,
+                actionableTip: tip,
+                severity: 'medium' as const,
+              }
+            : tip
+        )
+      : [],
+    improvementSuggestions: Array.isArray(data.improvementSuggestions)
+      ? data.improvementSuggestions
+      : Array.isArray(data.actionableImprovements)
+      ? data.actionableImprovements
+      : [],
+    recommendedRetryText: data.recommendedRetryText,
+    audioDataUrl,
+    audioUrl: recordingId ? `/api/audio/${encodeURIComponent(recordingId)}` : undefined,
+    recordingId,
+    pronunciationScore: pronunciation,
+    prosodyScore: prosody,
+    accuracyScore: contentAccuracy,
+    fluencyScore: fluency,
+    pitchContour: Array.isArray(data.pitchContour) ? data.pitchContour : undefined,
+    referencePitchContour: Array.isArray(data.referencePitchContour)
+      ? data.referencePitchContour
+      : undefined,
+    energyDb: typeof data.energyDb === 'number' ? data.energyDb : undefined,
+    speechRateWpm,
+    analysisMethod: data.analysisMethod || 'local_acoustic_adk',
+  };
 }
 
 export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
+  videoId,
+  videoTitle,
+  channel,
   language,
   mode,
+  showFurigana = true,
   allSegments,
   targetSegments,
   activeSegment,
@@ -58,32 +220,27 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   onModeChange,
   onSetAutoPauseAtSec,
   onClearLoopSegment,
-  onSubmitEvaluation,
+  onReportGenerated,
+  onPreviewStateChange,
+  onBusyStateChange,
+  onEvaluationError,
   autoPauseTriggerCount,
+  videoEndedCount = 0,
   latestReport,
   onAdvanceToNextSegment,
   onAdvanceToSegmentIndex,
+  triggerAnalyzeRef,
+  triggerRecordAgainRef,
 }) => {
-  const [sessionState, setSessionState] = useState<
-    | 'requesting_permission'
-    | 'idle'
-    | 'listening_to_model'
-    | 'recording'
-    | 'paused_recording'
-    | 'recorded_ready'
-  >('idle');
+  const [sessionState, setSessionState] = useState<RecordingSessionState>('idle');
   const [micError, setMicError] = useState<string | null>(null);
+  const [finalizeError, setFinalizeError] = useState<string | null>(null);
   const [recordingSec, setRecordingSec] = useState(0);
-  const [liveTranscript, setLiveTranscript] = useState('');
   const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null);
-  const [recordedBase64, setRecordedBase64] = useState<string | undefined>(
-    undefined
-  );
-  const [recordedMimeType, setRecordedMimeType] =
-    useState<string>('audio/webm');
-  const [speechApiSupported, setSpeechApiSupported] = useState(true);
+  const [recordedWavBlob, setRecordedWavBlob] = useState<Blob | null>(null);
+  const [previewResult, setPreviewResult] = useState<TranscribePreviewResult | null>(null);
+  const [takeSnapshot, setTakeSnapshot] = useState<TakeSnapshot | null>(null);
 
-  // Track the exact video time window covered during Simultaneous Mode
   const simultaneousStartVideoSecRef = useRef<number>(0);
   const [capturedSimultaneousSegments, setCapturedSimultaneousSegments] =
     useState<TranscriptSegment[] | null>(null);
@@ -95,14 +252,13 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const recognitionRef = useRef<any>(null);
   const timerIntervalRef = useRef<number | null>(null);
   const startTimeMsRef = useRef<number>(0);
+  const recordingSecRef = useRef<number>(0);
   const captureGeneration = useRef(0);
-  const isRecordingActiveRef = useRef<boolean>(false);
+  const activeUrlRef = useRef<string | null>(null);
+  const pendingSnapshotRef = useRef<TakeSnapshot | null>(null);
 
-  // In Listen-Then-Repeat mode, focus on activeSegment;
-  // In Simultaneous Mode, cover continuous segments from the current active segment (or user selection) through the end of the video!
   const effectiveSegments =
     mode === 'listen_repeat'
       ? [activeSegment]
@@ -122,31 +278,37 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     effectiveSegments[effectiveSegments.length - 1]?.endTime || startSec + 6;
   const targetDurationSec = Math.max(2, endSec - startSec);
 
-  useEffect(() => {
-    const SpeechRecognitionCtor =
-      (window as any).SpeechRecognition ||
-      (window as any).webkitSpeechRecognition;
-    setSpeechApiSupported(Boolean(SpeechRecognitionCtor));
-  }, []);
+  const isBusy = [
+    'permission',
+    'listening',
+    'recording',
+    'paused',
+    'finalizing',
+    'analyzing',
+  ].includes(sessionState);
 
-  // When YouTube player hits autoPauseAtSec during 'listening_to_model', automatically begin recording
   useEffect(() => {
-    if (sessionState === 'listening_to_model' && autoPauseTriggerCount > 0) {
-      onSetAutoPauseAtSec(null);
-      startMicrophoneCapture();
+    onBusyStateChange?.(isBusy);
+  }, [isBusy, onBusyStateChange]);
+
+  useEffect(() => {
+    onPreviewStateChange?.({
+      sessionState,
+      preview: previewResult,
+      recordedAudioUrl,
+      takeSnapshot,
+      finalizeError,
+    });
+  }, [sessionState, previewResult, recordedAudioUrl, takeSnapshot, finalizeError, onPreviewStateChange]);
+
+  const revokeActiveAudioUrl = () => {
+    if (activeUrlRef.current) {
+      URL.revokeObjectURL(activeUrlRef.current);
+      activeUrlRef.current = null;
     }
-  }, [autoPauseTriggerCount]);
-
-  // Cleanup audio & speech resources on unmount
-  useEffect(() => {
-    return () => {
-      captureGeneration.current += 1;
-      stopAllCaptureResources();
-    };
-  }, []);
+  };
 
   const stopAllCaptureResources = () => {
-    isRecordingActiveRef.current = false;
     if (timerIntervalRef.current) {
       window.clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
@@ -154,15 +316,6 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = null;
-    }
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.onend = null;
-        recognitionRef.current.stop();
-      } catch {
-        // Ignore
-      }
-      recognitionRef.current = null;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -172,9 +325,20 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       audioContextRef.current.close().catch(() => {});
       audioContextRef.current = null;
     }
+    analyserRef.current = null;
   };
 
-  const drawWaveform = () => {
+  useEffect(() => {
+    return () => {
+      captureGeneration.current += 1;
+      stopAllCaptureResources();
+      revokeActiveAudioUrl();
+    };
+  }, []);
+
+  // Draw live waveform AFTER recording state mounts <canvas> (R03)
+  useEffect(() => {
+    if (sessionState !== 'recording') return;
     const canvas = canvasRef.current;
     const analyser = analyserRef.current;
     if (!canvas || !analyser) return;
@@ -191,8 +355,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const barCount = 36;
-      const step = Math.floor(bufferLength / barCount);
-      const barWidth = Math.floor(canvas.width / barCount) - 2;
+      const step = Math.max(1, Math.floor(bufferLength / barCount));
+      const barWidth = Math.max(2, Math.floor(canvas.width / barCount) - 2);
 
       for (let i = 0; i < barCount; i++) {
         const val = dataArray[i * step] || 0;
@@ -201,7 +365,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         const x = i * (barWidth + 2);
         const y = (canvas.height - barHeight) / 2;
 
-        ctx.fillStyle = val > 180 ? '#0284C7' : '#38BDF8';
+        ctx.fillStyle = val > 180 ? '#c5bbff' : '#8b7cf6';
         ctx.beginPath();
         ctx.roundRect(x, y, barWidth, barHeight, 2);
         ctx.fill();
@@ -209,64 +373,130 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     };
 
     renderFrame();
+    return () => {
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+    };
+  }, [sessionState]);
+
+  // Auto-start recording when Listen-Then-Repeat finishes playing native clip
+  useEffect(() => {
+    if (sessionState === 'listening' && autoPauseTriggerCount > 0) {
+      onSetAutoPauseAtSec(null);
+      startMicrophoneCapture(pendingSnapshotRef.current || undefined);
+    }
+  }, [autoPauseTriggerCount]);
+
+  // Auto-stop recording if video ends during Simultaneous capture (R03)
+  useEffect(() => {
+    if (
+      videoEndedCount > 0 &&
+      mode === 'simultaneous' &&
+      (sessionState === 'recording' || sessionState === 'paused')
+    ) {
+      handleFinishRecording();
+    }
+  }, [videoEndedCount]);
+
+  // Auto-stop recording at 600s backend ceiling (R03)
+  useEffect(() => {
+    if (sessionState === 'recording' && recordingSec >= MAX_RECORDING_SEC) {
+      handleFinishRecording();
+    }
+  }, [recordingSec, sessionState]);
+
+  const createSnapshot = (segs: TranscriptSegment[], currentMode: ShadowingMode): TakeSnapshot => {
+    const sStart = segs[0]?.startTime || 0;
+    const sEnd = segs[segs.length - 1]?.endTime || sStart + 6;
+    return {
+      targetText: segs.map((s) => s.text).join(language === 'ja' ? '' : ' '),
+      segmentIds: segs.map((s) => s.id),
+      targetDurationSec: Math.max(2, sEnd - sStart),
+      mode: currentMode,
+      language,
+      startSec: sStart,
+      endSec: sEnd,
+    };
   };
 
-  const startWebSpeechRecognition = () => {
-    const SpeechRecognitionCtor =
-      (window as any).SpeechRecognition ||
-      (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognitionCtor) return;
+  const finalizeRecordedAudio = async (
+    rawBlob: Blob,
+    snapshot: TakeSnapshot,
+    generation: number,
+    durationFallback: number
+  ) => {
+    setSessionState('finalizing');
+    setFinalizeError(null);
 
     try {
-      const recognition = new SpeechRecognitionCtor();
-      recognition.lang = language === 'ja' ? 'ja-JP' : 'en-US';
-      recognition.continuous = true;
-      recognition.interimResults = true;
+      const { wavBlob, durationSec, rmsDb } = await encodeWav16kMono(rawBlob);
+      if (generation !== captureGeneration.current) return;
 
-      let finalTranscript = '';
+      revokeActiveAudioUrl();
+      const wavUrl = URL.createObjectURL(wavBlob);
+      activeUrlRef.current = wavUrl;
+      setRecordedAudioUrl(wavUrl);
+      setRecordedWavBlob(wavBlob);
 
-      recognition.onresult = (event: any) => {
-        let interim = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcriptPiece = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            finalTranscript +=
-              transcriptPiece + (language === 'ja' ? '' : ' ');
-          } else {
-            interim += transcriptPiece;
-          }
-        }
-        setLiveTranscript((finalTranscript + interim).trim());
+      const form = new FormData();
+      form.append('audio', wavBlob, 'take.wav');
+      form.append('language', snapshot.language);
+      form.append('target_text', snapshot.targetText);
+
+      const res = await fetch('/api/shadowing/transcribe', {
+        method: 'POST',
+        body: form,
+      });
+
+      if (generation !== captureGeneration.current) return;
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(
+          typeof data?.detail === 'string'
+            ? data.detail
+            : data?.error || 'Local Whisper speech preview failed.'
+        );
+      }
+
+      const preview: TranscribePreviewResult = {
+        recognizedText: String(data.recognizedText ?? ''),
+        isSilent: Boolean(data.isSilent),
+        durationSec: Number(data.durationSec ?? durationSec ?? durationFallback),
+        rmsDb: Number(data.rmsDb ?? rmsDb ?? -60),
+        pauseCount: Number(data.pauseCount ?? 0),
+        silenceRatio: Number(data.silenceRatio ?? 0),
+        pitchContour: Array.isArray(data.pitchContour) ? data.pitchContour : undefined,
       };
 
-      recognition.onerror = () => {
-        // Ignore transient browser STT errors; MediaRecorder still captures full audio
-      };
-
-      // Keep continuous speech recognition alive during long Simultaneous Shadowing sessions
-      recognition.onend = () => {
-        if (isRecordingActiveRef.current && recognitionRef.current) {
-          try {
-            recognitionRef.current.start();
-          } catch {
-            // Ignore restart race condition
-          }
-        }
-      };
-
-      recognition.start();
-      recognitionRef.current = recognition;
-    } catch {
-      // Ignore
+      setPreviewResult(preview);
+      setTakeSnapshot(snapshot);
+      setSessionState('ready');
+    } catch (err: any) {
+      if (generation !== captureGeneration.current) return;
+      setFinalizeError(
+        err?.message || 'Could not finalize or transcribe recorded audio.'
+      );
+      setSessionState('ready');
     }
   };
 
-  const startMicrophoneCapture = async (): Promise<boolean> => {
+  const startMicrophoneCapture = async (explicitSnapshot?: TakeSnapshot): Promise<boolean> => {
     setMicError(null);
-    setLiveTranscript('');
+    setFinalizeError(null);
+    setPreviewResult(null);
+    onEvaluationError?.(null);
     setRecordingSec(0);
+    recordingSecRef.current = 0;
+
+    const snapshot = explicitSnapshot || createSnapshot(effectiveSegments, mode);
+    pendingSnapshotRef.current = snapshot;
+    setTakeSnapshot(snapshot);
+
     const generation = ++captureGeneration.current;
-    setSessionState('requesting_permission');
+    setSessionState('permission');
     audioChunksRef.current = [];
 
     try {
@@ -283,9 +513,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       }
       streamRef.current = stream;
 
-      // Setup Web Audio API AnalyserNode for live waveform
       const AudioCtx =
-        window.AudioContext || (window as any).webkitAudioContext;
+        window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioCtx = new AudioCtx();
       audioContextRef.current = audioCtx;
       const source = audioCtx.createMediaStreamSource(stream);
@@ -294,10 +523,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       source.connect(analyser);
       analyserRef.current = analyser;
 
-      // Determine supported MediaRecorder mimeType
-      const preferredMime = MediaRecorder.isTypeSupported(
-        'audio/webm;codecs=opus'
-      )
+      const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/mp4')
         ? 'audio/mp4'
@@ -307,8 +533,6 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         ? new MediaRecorder(stream, { mimeType: preferredMime })
         : new MediaRecorder(stream);
 
-      setRecordedMimeType(recorder.mimeType || 'audio/webm');
-
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
           audioChunksRef.current.push(e.data);
@@ -317,38 +541,29 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
 
       recorder.onstop = () => {
         if (generation !== captureGeneration.current) return;
-        const blob = new Blob(audioChunksRef.current, {
+        const rawBlob = new Blob(audioChunksRef.current, {
           type: recorder.mimeType || 'audio/webm',
         });
-        const url = URL.createObjectURL(blob);
-        setRecordedAudioUrl(url);
-
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          if (generation !== captureGeneration.current) return;
-          const dataUrl = typeof reader.result === 'string' ? reader.result : '';
-          const base64 = dataUrl.includes(',')
-            ? dataUrl.split(',')[1]
-            : undefined;
-          setRecordedBase64(base64);
-          setSessionState('recorded_ready');
-        };
-        reader.readAsDataURL(blob);
+        const finalSnapshot = pendingSnapshotRef.current || snapshot;
+        void finalizeRecordedAudio(
+          rawBlob,
+          finalSnapshot,
+          generation,
+          recordingSecRef.current
+        );
       };
 
       mediaRecorderRef.current = recorder;
       recorder.start(250);
-      isRecordingActiveRef.current = true;
       setSessionState('recording');
       startTimeMsRef.current = Date.now();
 
       timerIntervalRef.current = window.setInterval(() => {
         const elapsed = (Date.now() - startTimeMsRef.current) / 1000;
+        recordingSecRef.current = elapsed;
         setRecordingSec(elapsed);
       }, 150);
 
-      drawWaveform();
-      startWebSpeechRecognition();
       return true;
     } catch (err: any) {
       if (generation !== captureGeneration.current) return false;
@@ -357,28 +572,47 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       onSetAutoPauseAtSec(null);
       setMicError(
         err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError'
-          ? 'Microphone access was denied. Please allow microphone permissions in your browser address bar, or use the "Simulate Practice Take" button below to test AI assessment.'
-          : 'No microphone was detected or audio capture failed. You can connect a microphone or use "Simulate Practice Take" below to test the diagnostic report.'
+          ? 'Microphone access was denied. Please allow microphone permissions in your browser address bar, or run a Demo Take below.'
+          : 'No microphone was detected or audio capture failed. Connect a microphone or run a Demo Take below.'
       );
       return false;
     }
   };
 
+  const handleCancelActiveTake = () => {
+    captureGeneration.current += 1;
+    onSetAutoPauseAtSec(null);
+    playerHandleRef.current?.pause();
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.onstop = null;
+        mediaRecorderRef.current.stop();
+      } catch {
+        // Ignore
+      }
+    }
+    stopAllCaptureResources();
+    setSessionState('idle');
+  };
+
   const handleStartSession = async () => {
     setMicError(null);
+    setFinalizeError(null);
+    setPreviewResult(null);
+    setRecordedWavBlob(null);
+    revokeActiveAudioUrl();
     setRecordedAudioUrl(null);
-    setRecordedBase64(undefined);
     setCapturedSimultaneousSegments(null);
 
     if (mode === 'listen_repeat') {
       let targetSeg = activeSegment;
       const isCurrentEvaluated = Boolean(
         latestReport &&
+          !latestReport.isDemo &&
           latestReport.mode === 'listen_repeat' &&
           latestReport.segmentIds.includes(activeSegment.id)
       );
 
-      // If previous take on current sentence was evaluated, advance to the next sentence!
       if (isCurrentEvaluated && onAdvanceToNextSegment) {
         const next = onAdvanceToNextSegment();
         if (next) {
@@ -386,31 +620,26 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         }
       }
 
-      // Step 1: Seek YouTube player to target segment start, set single-shot autoPauseAtSec to segment end, and play native audio first
+      const snap = createSnapshot([targetSeg], 'listen_repeat');
+      pendingSnapshotRef.current = snap;
+      setTakeSnapshot(snap);
+
       if (playerHandleRef.current) {
         onSetAutoPauseAtSec(targetSeg.endTime);
         playerHandleRef.current.seekTo(targetSeg.startTime, true);
         playerHandleRef.current.play();
-        setSessionState('listening_to_model');
+        setSessionState('listening');
       } else {
-        await startMicrophoneCapture();
+        await startMicrophoneCapture(snap);
       }
     } else {
-      // Simultaneous Mode:
-      // 1. NEVER set autoPauseAtSec or loopSegment — allow uninterrupted continuous playback from start to finish!
       onSetAutoPauseAtSec(null);
       onClearLoopSegment();
 
-      // 2. Start microphone capture FIRST so browser permission prompt never interrupts video playback
-      const micStarted = await startMicrophoneCapture();
-      if (!micStarted) return;
-
-      // 3. Determine starting position for this simultaneous session:
-      let startSec = activeSegment?.startTime || 0;
-
-      // Check if previous simultaneous session was evaluated and needs to advance to the next section
+      let startAt = activeSegment?.startTime || 0;
       const isSimultaneousEvaluated = Boolean(
         latestReport &&
+          !latestReport.isDemo &&
           latestReport.mode === 'simultaneous' &&
           latestReport.segmentIds &&
           latestReport.segmentIds.length > 0
@@ -421,37 +650,39 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           latestReport.segmentIds[latestReport.segmentIds.length - 1];
         const lastIdx = allSegments.findIndex((s) => s.id === lastEvaluatedId);
         if (lastIdx !== -1 && lastIdx + 1 < allSegments.length) {
-          const nextIndex = lastIdx + 1;
           const nextSeg = onAdvanceToSegmentIndex
-            ? onAdvanceToSegmentIndex(nextIndex)
-            : allSegments[nextIndex];
+            ? onAdvanceToSegmentIndex(lastIdx + 1)
+            : allSegments[lastIdx + 1];
           if (nextSeg) {
-            startSec = nextSeg.startTime;
+            startAt = nextSeg.startTime;
           }
         }
-      } else {
-        const hasSpecificSubset =
-          targetSegments.length > 0 &&
-          targetSegments.length < allSegments.length;
-
-        if (hasSpecificSubset) {
-          startSec = targetSegments[0].startTime;
-        } else if (playerHandleRef.current) {
-          const curTime = playerHandleRef.current.getCurrentTime();
-          if (curTime > 0.5 && Math.abs(curTime - (activeSegment?.startTime || 0)) < 3.0) {
-            startSec = curTime;
-          } else {
-            startSec = activeSegment?.startTime || 0;
-          }
+      } else if (targetSegments.length > 0 && targetSegments.length < allSegments.length) {
+        startAt = targetSegments[0].startTime;
+      } else if (playerHandleRef.current) {
+        const curTime = playerHandleRef.current.getCurrentTime();
+        if (curTime > 0.5 && Math.abs(curTime - (activeSegment?.startTime || 0)) < 3.0) {
+          startAt = curTime;
         }
       }
 
-      simultaneousStartVideoSecRef.current = startSec;
+      simultaneousStartVideoSecRef.current = startAt;
+      const initialSegs =
+        targetSegments.length > 1
+          ? targetSegments
+          : allSegments.filter((s) => s.endTime > startAt);
+      const snap = createSnapshot(
+        initialSegs.length > 0 ? initialSegs : [activeSegment],
+        'simultaneous'
+      );
+
+      const micStarted = await startMicrophoneCapture(snap);
+      if (!micStarted) return;
 
       if (playerHandleRef.current) {
         const currentVidTime = playerHandleRef.current.getCurrentTime();
-        if (Math.abs(currentVidTime - startSec) > 0.5) {
-          playerHandleRef.current.seekTo(startSec, true);
+        if (Math.abs(currentVidTime - startAt) > 0.5) {
+          playerHandleRef.current.seekTo(startAt, true);
         }
         playerHandleRef.current.play();
       }
@@ -461,47 +692,51 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const handleRecordImmediately = async () => {
     onSetAutoPauseAtSec(null);
     playerHandleRef.current?.pause();
-    await startMicrophoneCapture();
+    const snap = createSnapshot(effectiveSegments, mode);
+    await startMicrophoneCapture(snap);
   };
 
   const handlePauseOrResumeRecording = () => {
     const recorder = mediaRecorderRef.current;
     if (!recorder) return;
     if (sessionState === 'recording' && recorder.state === 'recording') {
-      isRecordingActiveRef.current = false;
       recorder.pause();
       playerHandleRef.current?.pause();
       if (timerIntervalRef.current) {
         window.clearInterval(timerIntervalRef.current);
         timerIntervalRef.current = null;
       }
-      setSessionState('paused_recording');
-    } else if (
-      sessionState === 'paused_recording' &&
-      recorder.state === 'paused'
-    ) {
-      isRecordingActiveRef.current = true;
+      setSessionState('paused');
+    } else if (sessionState === 'paused' && recorder.state === 'paused') {
       recorder.resume();
       if (mode === 'simultaneous') {
         onSetAutoPauseAtSec(null);
         playerHandleRef.current?.play();
       }
-      startTimeMsRef.current = Date.now() - recordingSec * 1000;
+      startTimeMsRef.current = Date.now() - recordingSecRef.current * 1000;
       timerIntervalRef.current = window.setInterval(() => {
-        setRecordingSec((Date.now() - startTimeMsRef.current) / 1000);
+        const elapsed = (Date.now() - startTimeMsRef.current) / 1000;
+        recordingSecRef.current = elapsed;
+        setRecordingSec(elapsed);
       }, 150);
       setSessionState('recording');
     }
   };
 
-  const handleStopRecording = () => {
+  const handleFinishRecording = () => {
+    if (sessionState !== 'recording' && sessionState !== 'paused') {
+      if (sessionState === 'permission' || sessionState === 'listening') {
+        handleCancelActiveTake();
+      }
+      return;
+    }
+
     onSetAutoPauseAtSec(null);
     const stopVideoSec =
       playerHandleRef.current?.getCurrentTime?.() ||
-      simultaneousStartVideoSecRef.current + recordingSec;
+      simultaneousStartVideoSecRef.current + recordingSecRef.current;
     playerHandleRef.current?.pause();
 
-    // In Simultaneous Mode, capture the exact segments that played during the continuous session
     if (mode === 'simultaneous' && allSegments.length > 0) {
       const startWin = simultaneousStartVideoSecRef.current;
       const endWin = Math.max(startWin + 2, stopVideoSec);
@@ -510,145 +745,219 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       );
       if (covered.length > 0) {
         setCapturedSimultaneousSegments(covered);
+        const updatedSnap = createSnapshot(covered, 'simultaneous');
+        pendingSnapshotRef.current = updatedSnap;
+        setTakeSnapshot(updatedSnap);
       }
     }
 
-    if (
-      mediaRecorderRef.current &&
-      mediaRecorderRef.current.state !== 'inactive'
-    ) {
+    setSessionState('finalizing');
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
+    } else {
+      setSessionState('idle');
     }
     stopAllCaptureResources();
   };
 
-  const handleTriggerEvaluation = () => {
-    onSubmitEvaluation({
-      audioBase64: recordedBase64,
-      mimeType: recordedMimeType,
-      audioDataUrl: recordedAudioUrl || undefined,
-      webSpeechTranscript: liveTranscript,
-      durationSec: Math.max(1.5, recordingSec),
-      targetDurationSec,
-      targetText,
-      segmentIds: effectiveSegments.map((s) => s.id),
-    });
+  const handleAnalyzeShadowing = async () => {
+    if (!recordedWavBlob || !takeSnapshot || sessionState === 'analyzing') return;
+    setSessionState('analyzing');
+    onEvaluationError?.(null);
+
+    try {
+      const form = new FormData();
+      form.append('audio', recordedWavBlob, 'take.wav');
+      form.append('target_text', takeSnapshot.targetText);
+      form.append('language', takeSnapshot.language);
+      form.append('mode', takeSnapshot.mode);
+      form.append('video_id', videoId);
+      form.append('segment_ids', JSON.stringify(takeSnapshot.segmentIds));
+      form.append(
+        'duration_sec',
+        String(previewResult?.durationSec ?? Math.max(1, recordingSecRef.current))
+      );
+      form.append('target_duration_sec', String(takeSnapshot.targetDurationSec));
+      if (previewResult?.recognizedText) {
+        form.append('recognized_text', previewResult.recognizedText);
+      }
+
+      const res = await fetch('/api/shadowing/analyze', {
+        method: 'POST',
+        body: form,
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(
+          typeof data?.detail === 'string'
+            ? data.detail
+            : data?.error || 'Shadowing analysis failed.'
+        );
+      }
+
+      const { dataUrl } = await blobToBase64(recordedWavBlob).catch(() => ({
+        dataUrl: recordedAudioUrl || '',
+      }));
+
+      const report = normalizeReportFromAnalyzeApi(
+        data,
+        takeSnapshot,
+        videoId,
+        videoTitle,
+        channel,
+        previewResult?.durationSec ?? recordingSecRef.current,
+        dataUrl || recordedAudioUrl || undefined
+      );
+
+      setSessionState('reviewed');
+      onReportGenerated(report);
+    } catch (err: any) {
+      setSessionState('ready');
+      onEvaluationError?.(
+        err?.message || 'Failed to analyze shadowing performance.'
+      );
+    }
   };
 
-  // Allows testing the full AI evaluation pipeline even if the user has no mic or wants to simulate a near-native take
-  const handleSimulatePracticeTake = () => {
+  const handleRecordAgain = () => {
+    setFinalizeError(null);
+    setPreviewResult(null);
+    setRecordedWavBlob(null);
+    revokeActiveAudioUrl();
+    setRecordedAudioUrl(null);
+    setSessionState('idle');
+  };
+
+  useEffect(() => {
+    if (triggerAnalyzeRef) {
+      triggerAnalyzeRef.current = () => {
+        void handleAnalyzeShadowing();
+      };
+    }
+    if (triggerRecordAgainRef) {
+      triggerRecordAgainRef.current = handleRecordAgain;
+    }
+  });
+
+  // R08: Demo take clearly flagged with isDemo: true so it never pollutes SQLite history averages
+  const handleSimulateDemoTake = async () => {
     const sampleSegs =
       mode === 'simultaneous'
-        ? effectiveSegments.slice(0, Math.min(4, effectiveSegments.length))
+        ? effectiveSegments.slice(0, Math.min(3, effectiveSegments.length))
         : effectiveSegments;
-    const sampleTargetText = sampleSegs
-      .map((s) => s.text)
-      .join(language === 'ja' ? '' : ' ');
-    const sampleDur = Math.max(
-      3,
-      (sampleSegs[sampleSegs.length - 1]?.endTime || 6) -
-        (sampleSegs[0]?.startTime || 0)
-    );
-
-    const words = sampleTargetText.split(' ');
+    const snap = createSnapshot(sampleSegs, mode);
+    const words = snap.targetText.split(' ');
     const simulatedSpeech =
       language === 'ja'
-        ? sampleTargetText.slice(0, Math.max(4, sampleTargetText.length - 3))
+        ? snap.targetText.slice(0, Math.max(4, snap.targetText.length - 3))
         : words.length > 4
         ? words.filter((_, i) => i !== 2).join(' ')
-        : sampleTargetText;
+        : snap.targetText;
 
-    setLiveTranscript(simulatedSpeech);
-    setRecordingSec(sampleDur * 1.08);
-    setSessionState('recorded_ready');
-    onSubmitEvaluation({
-      audioBase64: undefined,
-      mimeType: 'audio/webm',
-      webSpeechTranscript: simulatedSpeech,
-      durationSec: Number((sampleDur * 1.08).toFixed(1)),
-      targetDurationSec: sampleDur,
-      targetText: sampleTargetText,
-      segmentIds: sampleSegs.map((s) => s.id),
-    });
-  };
+    setSessionState('analyzing');
+    onEvaluationError?.(null);
 
-  const handleReplayOriginalVideo = () => {
-    if (!playerHandleRef.current) return;
-    if (mode === 'listen_repeat') {
-      onSetAutoPauseAtSec(endSec);
-    } else {
-      onSetAutoPauseAtSec(null);
+    try {
+      const res = await fetch('/api/shadowing/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetText: snap.targetText,
+          language: snap.language,
+          mode: snap.mode,
+          webSpeechTranscript: simulatedSpeech,
+          durationSec: Number((snap.targetDurationSec * 1.05).toFixed(1)),
+          targetDurationSec: snap.targetDurationSec,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(
+          typeof data?.detail === 'string' ? data.detail : data?.error || 'Demo take failed.'
+        );
+      }
+      const report = normalizeReportFromAnalyzeApi(
+        data,
+        snap,
+        videoId,
+        videoTitle,
+        channel,
+        Number((snap.targetDurationSec * 1.05).toFixed(1))
+      );
+      report.isDemo = true;
+      setSessionState('reviewed');
+      onReportGenerated(report);
+    } catch (err: any) {
+      setSessionState('idle');
+      onEvaluationError?.(err?.message || 'Demo assessment failed.');
     }
-    playerHandleRef.current.seekTo(startSec, true);
-    playerHandleRef.current.play();
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-4">
+    <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-4 min-w-0">
       {/* Header & Mode Switcher */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
-        <div>
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+        <div className="min-w-0">
           <h2 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-            <Mic className="w-4 h-4 text-sky-600" />
-            <span>AI Shadowing Practice Studio</span>
+            <Mic className="w-4 h-4 text-sky-600 shrink-0" />
+            <span>AI Shadowing Practice</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
             {mode === 'listen_repeat'
-              ? 'Listen-Then-Repeat: Plays the current sentence, auto-pauses video, then records your repetition.'
-              : 'Simultaneous Shadowing: Plays the video continuously from start to finish while you shadow in real time.'}
+              ? 'Listen to the segment, auto-pause, then record your repetition.'
+              : 'Video plays continuously without pausing. Wear headphones so your mic captures only your voice.'}
           </p>
         </div>
 
-        {/* Interactive Mode Segmented Control */}
-        <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
+        <div className="flex flex-wrap items-center gap-1 p-1 bg-[#151925] border border-[#525a6d] rounded-lg">
           <button
             type="button"
-            disabled={isEvaluating || !['idle', 'recorded_ready'].includes(sessionState)}
+            aria-pressed={mode === 'listen_repeat'}
+            disabled={isBusy || isEvaluating}
             onClick={() => {
               onSetAutoPauseAtSec(null);
               setCapturedSimultaneousSegments(null);
               onModeChange('listen_repeat');
-              setSessionState('idle');
+              handleRecordAgain();
             }}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               mode === 'listen_repeat'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-[#c3bbff] text-[#151925] shadow-xs'
+                : 'text-[#b8c1d4] hover:text-[#eef1fa]'
             }`}
           >
-            Listen-Then-Repeat
+            Listen and repeat
           </button>
           <button
             type="button"
-            disabled={isEvaluating || !['idle', 'recorded_ready'].includes(sessionState)}
+            aria-pressed={mode === 'simultaneous'}
+            disabled={isBusy || isEvaluating}
             onClick={() => {
-              // Ensure no single-sentence auto-pause or loop blocks continuous playback
               onSetAutoPauseAtSec(null);
               onClearLoopSegment();
               setCapturedSimultaneousSegments(null);
               onModeChange('simultaneous');
-              setSessionState('idle');
+              handleRecordAgain();
             }}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               mode === 'simultaneous'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-[#c3bbff] text-[#151925] shadow-xs'
+                : 'text-[#b8c1d4] hover:text-[#eef1fa]'
             }`}
           >
-            Simultaneous Mode
+            Simultaneous
           </button>
         </div>
       </div>
 
       {/* Headphone Advisory for Simultaneous Mode */}
       {mode === 'simultaneous' && (
-        <div className="px-3 py-2 bg-slate-50 border border-slate-200/80 rounded-lg flex items-center justify-between gap-2 text-xs text-slate-600">
-          <div className="flex items-center gap-2">
+        <div className="px-3 py-2 bg-slate-50 border border-slate-200/80 rounded-lg flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+          <div className="flex items-center gap-2 min-w-0">
             <Headphones className="w-4 h-4 text-sky-600 shrink-0" />
             <span>
-              <strong>Continuous Simultaneous Mode:</strong> The video will play
-              continuously without pausing. Wear headphones so your mic captures
-              only your voice.
+              <strong>Continuous Simultaneous Mode:</strong> Wear headphones so your mic captures only your voice.
             </span>
           </div>
           <span className="font-mono-tabular text-slate-500 shrink-0">
@@ -657,59 +966,78 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         </div>
       )}
 
-      {/* Target Script Preview Box */}
+      {/* Target Script Preview Box (with Japanese Furigana <ruby> support — U03) */}
       <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-lg">
-        <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 mb-1.5">
           <span>
             {mode === 'listen_repeat'
               ? 'Active Sentence Target'
-              : `Continuous Shadowing Scope (${effectiveSegments.length} Segments · ${formatTimestamp(
-                  startSec
-                )} – ${formatTimestamp(endSec)})`}
+              : `Continuous Scope (${effectiveSegments.length} Segments)`}
           </span>
           <span className="font-mono-tabular">
-            Duration: {targetDurationSec.toFixed(1)}s
+            {targetDurationSec.toFixed(1)}s
           </span>
         </div>
-        <p className="text-sm font-medium text-slate-900 leading-relaxed max-h-28 overflow-y-auto">
-          {mode === 'simultaneous' ? activeSegment.text : targetText}
-        </p>
-        {mode === 'simultaneous' && effectiveSegments.length > 1 && (
-          <p className="text-[11px] text-slate-500 mt-1">
-            Showing current active line above — follow the synchronized
-            Interactive Transcript Reader on the right as the video plays
-            continuously.
-          </p>
-        )}
+        <div className="text-sm sm:text-base font-medium text-slate-900 leading-relaxed max-h-28 overflow-y-auto break-words">
+          {language === 'ja' && showFurigana && activeSegment.tokens && activeSegment.tokens.length > 0 ? (
+            <span className="inline-flex flex-wrap items-baseline gap-x-0.5">
+              {(mode === 'simultaneous' ? activeSegment.tokens : effectiveSegments.flatMap((s) => s.tokens || [{ surface: s.text }])).map((tok, i) => {
+                const useRuby =
+                  tok.reading &&
+                  tok.reading !== tok.surface &&
+                  /[\u4e00-\u9faf]/.test(tok.surface);
+                return useRuby ? (
+                  <ruby key={i} className="mr-0.5">
+                    {tok.surface}
+                    <rt>{tok.reading}</rt>
+                  </ruby>
+                ) : (
+                  <span key={i}>{tok.surface}</span>
+                );
+              })}
+            </span>
+          ) : (
+            <span>{mode === 'simultaneous' ? activeSegment.text : targetText}</span>
+          )}
+        </div>
       </div>
 
-      {/* Live Recording Status & Waveform Bar */}
-      {(sessionState === 'listening_to_model' ||
+      {/* Active Capture / Permission / Listening / Finalizing Status */}
+      {(sessionState === 'permission' ||
+        sessionState === 'listening' ||
         sessionState === 'recording' ||
-        sessionState === 'paused_recording') && (
+        sessionState === 'paused' ||
+        sessionState === 'finalizing') && (
         <div className="p-3.5 bg-sky-50/70 border border-sky-200 rounded-lg space-y-2.5">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs font-semibold text-sky-950">
-              {sessionState === 'listening_to_model' ? (
+              {sessionState === 'permission' ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
+                  <span>Requesting microphone access...</span>
+                </>
+              ) : sessionState === 'listening' ? (
                 <>
                   <Volume2 className="w-4 h-4 text-sky-600" />
-                  <span>
-                    Step 1/2: Listening to Native Speaker... (Mic starts
-                    automatically at pause)
-                  </span>
+                  <span>Listening to Native Speaker (mic starts at pause)</span>
                 </>
-              ) : sessionState === 'paused_recording' ? (
+              ) : sessionState === 'paused' ? (
                 <>
                   <Pause className="w-4 h-4 text-amber-600" />
-                  <span>Recording &amp; Video Paused</span>
+                  <span>Recording Paused</span>
+                </>
+              ) : sessionState === 'finalizing' ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
+                  <span>Encoding 16 kHz WAV &amp; running local Whisper transcription...</span>
                 </>
               ) : (
                 <>
-                  <Mic className="w-4 h-4 text-red-600" />
+                  <Mic className="w-4 h-4 text-red-500 animate-pulse" />
                   <span>
                     {mode === 'simultaneous'
-                      ? 'Simultaneous Recording Active — Video Playing Continuously'
-                      : 'Recording Your Voice Now — Speak Clearly Along with the Script'}
+                      ? 'Simultaneously Recording (100% local)'
+                      : 'Recording Your Voice (100% local)'}
                   </span>
                 </>
               )}
@@ -719,11 +1047,10 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
             </span>
           </div>
 
-          {sessionState === 'listening_to_model' ? (
-            <div className="flex items-center justify-between pt-1">
+          {sessionState === 'listening' && (
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
               <span className="text-xs text-slate-600">
-                Video will pause at {formatTimestamp(activeSegment.endTime)} and
-                start recording.
+                Pauses at {formatTimestamp(activeSegment.endTime)}
               </span>
               <button
                 type="button"
@@ -733,168 +1060,78 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
                 Skip Listen &amp; Record Now
               </button>
             </div>
-          ) : (
-            <>
-              <canvas
-                ref={canvasRef}
-                width={520}
-                height={42}
-                className="w-full h-10 bg-white border border-sky-100 rounded-md"
-              />
-              <div className="text-xs text-slate-600 flex items-start justify-between gap-2">
-                <div>
-                  <span className="font-medium text-slate-700">
-                    Live Speech Recognition:{' '}
-                  </span>
-                  <span className="italic text-slate-800">
-                    {liveTranscript ||
-                      (speechApiSupported
-                        ? 'Listening for spoken words...'
-                        : 'Browser live preview unavailable — full audio is being recorded for local Whisper transcription.')}
-                  </span>
-                </div>
-              </div>
-            </>
+          )}
+
+          {(sessionState === 'recording' || sessionState === 'paused') && (
+            <canvas
+              ref={canvasRef}
+              width={520}
+              height={42}
+              className="w-full h-10 bg-slate-950/60 border border-sky-100 rounded-md"
+            />
           )}
         </div>
       )}
 
-      {/* Microphone Error / Recovery Banner */}
+      {/* Microphone Error Banner */}
       {micError && (
-        <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5 text-xs text-amber-900">
+        <div role="alert" className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5 text-xs text-amber-900">
           <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
           <div className="space-y-1.5">
             <p>{micError}</p>
             <button
               type="button"
-              onClick={handleSimulatePracticeTake}
+              onClick={handleSimulateDemoTake}
               className="px-3 py-1.5 bg-amber-800 hover:bg-amber-900 text-white font-medium rounded-md transition-colors cursor-pointer"
             >
-              Run Demo Assessment with Sample Spoken Take
+              Start Demo Take
             </button>
           </div>
         </div>
       )}
 
       {/* Primary Action Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex flex-wrap items-center gap-2">
-          {sessionState === 'idle' || sessionState === 'recorded_ready' ? (
+          {sessionState === 'idle' || sessionState === 'ready' || sessionState === 'reviewed' ? (
             <>
               {(() => {
                 const isListenRepeatEvaluated = Boolean(
                   mode === 'listen_repeat' &&
                     latestReport &&
+                    !latestReport.isDemo &&
                     latestReport.mode === 'listen_repeat' &&
                     latestReport.segmentIds.includes(activeSegment.id)
                 );
                 const hasNextSentence = activeSegment.index + 1 < allSegments.length;
 
-                const isSimultaneousEvaluated = Boolean(
-                  mode === 'simultaneous' &&
-                    latestReport &&
-                    latestReport.mode === 'simultaneous' &&
-                    latestReport.segmentIds &&
-                    latestReport.segmentIds.length > 0
-                );
-                const lastSimultaneousId = isSimultaneousEvaluated
-                  ? latestReport!.segmentIds[latestReport!.segmentIds.length - 1]
-                  : null;
-                const lastSimultaneousIdx = lastSimultaneousId
-                  ? allSegments.findIndex((s) => s.id === lastSimultaneousId)
-                  : -1;
-                const hasNextSection =
-                  lastSimultaneousIdx !== -1 && lastSimultaneousIdx + 1 < allSegments.length;
-
                 return (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleStartSession}
-                      disabled={isEvaluating}
-                      className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-                    >
-                      {mode === 'listen_repeat' ? (
-                        isListenRepeatEvaluated && hasNextSentence ? (
-                          <>
-                            <ArrowRight className="w-4 h-4" />
-                            <span>Start Listen-Then-Repeat (Next Sentence)</span>
-                          </>
-                        ) : (
-                          <>
-                            <Mic className="w-4 h-4" />
-                            <span>Start Listen-Then-Repeat</span>
-                          </>
-                        )
-                      ) : isSimultaneousEvaluated && hasNextSection ? (
-                        <>
-                          <ArrowRight className="w-4 h-4" />
-                          <span>Start Simultaneous Shadowing (Next Section)</span>
-                        </>
-                      ) : (
-                        <>
-                          <Mic className="w-4 h-4" />
-                          <span>Start Simultaneous Shadowing</span>
-                        </>
-                      )}
-                    </button>
-
-                    {isListenRepeatEvaluated && mode === 'listen_repeat' && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setMicError(null);
-                          setRecordedAudioUrl(null);
-                          setRecordedBase64(undefined);
-                          if (playerHandleRef.current) {
-                            onSetAutoPauseAtSec(activeSegment.endTime);
-                            playerHandleRef.current.seekTo(activeSegment.startTime, true);
-                            playerHandleRef.current.play();
-                            setSessionState('listening_to_model');
-                          }
-                        }}
-                        disabled={isEvaluating}
-                        className="flex items-center gap-1.5 px-3 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>Retry Current Sentence</span>
-                      </button>
+                  <button
+                    type="button"
+                    onClick={handleStartSession}
+                    disabled={isEvaluating}
+                    className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                  >
+                    {mode === 'listen_repeat' && isListenRepeatEvaluated && hasNextSentence ? (
+                      <>
+                        <ArrowRight className="w-4 h-4" />
+                        <span>Next Sentence</span>
+                      </>
+                    ) : (
+                      <>
+                        <Mic className="w-4 h-4" />
+                        <span>
+                          {sessionState === 'ready' || sessionState === 'reviewed'
+                            ? 'Record Again'
+                            : 'Record Yourself'}
+                        </span>
+                      </>
                     )}
-
-                    {isSimultaneousEvaluated && mode === 'simultaneous' && (
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          const firstEvaluatedId = latestReport!.segmentIds[0];
-                          const firstIdx = allSegments.findIndex((s) => s.id === firstEvaluatedId);
-                          const targetIdx = firstIdx !== -1 ? firstIdx : 0;
-                          const targetSeg = onAdvanceToSegmentIndex
-                            ? onAdvanceToSegmentIndex(targetIdx)
-                            : allSegments[targetIdx];
-                          const retryStartSec = targetSeg?.startTime || 0;
-                          simultaneousStartVideoSecRef.current = retryStartSec;
-                          setMicError(null);
-                          setRecordedAudioUrl(null);
-                          setRecordedBase64(undefined);
-                          setCapturedSimultaneousSegments(null);
-                          const micStarted = await startMicrophoneCapture();
-                          if (micStarted && playerHandleRef.current) {
-                            playerHandleRef.current.seekTo(retryStartSec, true);
-                            playerHandleRef.current.play();
-                          }
-                        }}
-                        disabled={isEvaluating}
-                        className="flex items-center gap-1.5 px-3 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>Retry Previous Section</span>
-                      </button>
-                    )}
-                  </>
+                  </button>
                 );
               })()}
 
-              {mode === 'listen_repeat' && (
+              {mode === 'listen_repeat' && sessionState === 'idle' && (
                 <button
                   type="button"
                   onClick={handleRecordImmediately}
@@ -906,101 +1143,215 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
                 </button>
               )}
             </>
-          ) : (
+          ) : sessionState === 'permission' || sessionState === 'listening' ? (
+            <button
+              type="button"
+              onClick={handleCancelActiveTake}
+              className="flex items-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Cancel</span>
+            </button>
+          ) : sessionState === 'recording' || sessionState === 'paused' ? (
             <>
               <button
                 type="button"
-                onClick={handleStopRecording}
+                onClick={handleFinishRecording}
                 className="flex items-center gap-2 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Square className="w-3.5 h-3.5 fill-current" />
-                <span>Finish &amp; Stop Recording</span>
+                <span>Finish Recording</span>
               </button>
 
-              {sessionState !== 'listening_to_model' && (
-                <button
-                  type="button"
-                  onClick={handlePauseOrResumeRecording}
-                  className="flex items-center gap-1.5 px-3 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  {sessionState === 'paused_recording' ? (
-                    <>
-                      <Play className="w-3.5 h-3.5" />
-                      <span>Resume Mic &amp; Video</span>
-                    </>
-                  ) : (
-                    <>
-                      <Pause className="w-3.5 h-3.5" />
-                      <span>Pause Mic &amp; Video</span>
-                    </>
-                  )}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={handlePauseOrResumeRecording}
+                className="flex items-center gap-1.5 px-3 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                {sessionState === 'paused' ? (
+                  <>
+                    <Play className="w-3.5 h-3.5" />
+                    <span>Resume Recording</span>
+                  </>
+                ) : (
+                  <>
+                    <Pause className="w-3.5 h-3.5" />
+                    <span>Pause Recording</span>
+                  </>
+                )}
+              </button>
             </>
-          )}
+          ) : null}
         </div>
 
-        {/* Secondary Utility: Simulate Practice Take or Evaluate Recording */}
-        <div className="flex items-center gap-2">
-          {sessionState === 'recorded_ready' && (
-            <button
-              type="button"
-              onClick={handleTriggerEvaluation}
-              disabled={isEvaluating}
-              className="flex items-center gap-2 px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-            >
-              {isEvaluating ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
-                  <span>Analyzing Audio &amp; Prosody...</span>
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-4 h-4 text-sky-400" />
-                  <span>Analyze Pronunciation &amp; Fluency</span>
-                </>
-              )}
-            </button>
-          )}
-
+        <div className="flex flex-wrap items-center gap-2">
           {sessionState === 'idle' && (
             <button
               type="button"
-              onClick={handleSimulatePracticeTake}
+              onClick={handleSimulateDemoTake}
               disabled={isEvaluating}
-              title="Run an instant AI assessment demo without speaking into a microphone"
+              title="Run a demo take without speaking into a microphone (excluded from real progress)"
               className="px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
             >
-              {isEvaluating ? 'Evaluating...' : 'Simulate Practice Take'}
+              Start demo take
             </button>
           )}
         </div>
       </div>
+    </div>
+  );
+};
 
-      {/* Post-Recording A/B Audio Comparison Deck */}
-      {recordedAudioUrl && (
-        <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleReplayOriginalVideo}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+// ---------------------------------------------------------------------------
+// S05 Full-Width Local Whisper Preview Card (Rendered below .echo-studio)
+// ---------------------------------------------------------------------------
+
+interface RecognizedSpeechPreviewProps {
+  state: S05PreviewState;
+  onPlayRecordedAudio?: () => void;
+  onRecordAgain: () => void;
+  onAnalyzeResult: () => void;
+}
+
+export const RecognizedSpeechPreview: React.FC<RecognizedSpeechPreviewProps> = ({
+  state,
+  onRecordAgain,
+  onAnalyzeResult,
+}) => {
+  const { sessionState, preview, recordedAudioUrl, finalizeError } = state;
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  if (
+    sessionState !== 'finalizing' &&
+    sessionState !== 'ready' &&
+    sessionState !== 'analyzing'
+  ) {
+    return null;
+  }
+
+  const hasSpeech = Boolean(
+    preview && !preview.isSilent && preview.recognizedText.trim().length > 0
+  );
+
+  return (
+    <section
+      aria-label="AI Recognized Speech Preview"
+      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-base font-bold text-slate-900">
+          AI Recognized Speech:
+        </h2>
+
+        {preview && (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-medium ${
+                hasSpeech
+                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                  : 'bg-amber-50 text-amber-800 border border-amber-200'
+              }`}
             >
-              <RotateCcw className="w-3.5 h-3.5 text-sky-600" />
-              <span>1. Replay Native Speaker</span>
-            </button>
-            <span className="text-xs text-slate-400">vs.</span>
-            <span className="text-xs font-medium text-slate-700">
-              2. Your Recorded Voice:
+              {hasSpeech ? (
+                <CheckCircle2 className="w-3.5 h-3.5" />
+              ) : (
+                <AlertTriangle className="w-3.5 h-3.5" />
+              )}
+              <span>
+                Audio Ready · {preview.durationSec.toFixed(1)}s · {preview.rmsDb.toFixed(1)} dBFS
+              </span>
             </span>
           </div>
+        )}
+      </div>
+
+      {sessionState === 'finalizing' && (
+        <div className="flex items-center gap-2 text-sm text-slate-600 py-3">
+          <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
+          <span>Transcribing your recording locally with Whisper Large-v3-Turbo...</span>
+        </div>
+      )}
+
+      {finalizeError && (
+        <div role="alert" className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+          {finalizeError}
+        </div>
+      )}
+
+      {preview && sessionState !== 'finalizing' && (
+        <>
+          {!hasSpeech ? (
+            <div
+              role="status"
+              className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5 text-xs sm:text-sm text-amber-950"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <span>
+                No clear speech detected in recording — please check your microphone or record again.
+              </span>
+            </div>
+          ) : (
+            <p className="text-sm sm:text-base text-slate-800 leading-relaxed bg-slate-50 border border-slate-200/80 rounded-lg p-4">
+              {preview.recognizedText}
+            </p>
+          )}
+        </>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={onAnalyzeResult}
+            disabled={
+              sessionState !== 'ready' || Boolean(finalizeError)
+            }
+            className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+          >
+            {sessionState === 'analyzing' ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Analyzing Shadowing Result...</span>
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-4 h-4" />
+                <span>Analyze Shadowing Result</span>
+              </>
+            )}
+          </button>
+
+          {recordedAudioUrl && (
+            <button
+              type="button"
+              onClick={() => audioRef.current?.play().catch(() => {})}
+              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>Play Recorded Audio</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onRecordAgain}
+            disabled={sessionState === 'analyzing'}
+            className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Record Again</span>
+          </button>
+        </div>
+
+        {recordedAudioUrl && (
           <audio
+            ref={audioRef}
             controls
             src={recordedAudioUrl}
             className="h-8 max-w-[260px]"
           />
-        </div>
-      )}
-    </div>
+        )}
+      </div>
+    </section>
   );
 };

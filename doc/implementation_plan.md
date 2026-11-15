@@ -1,5 +1,8 @@
 # EchoSense — English & Japanese AI YouTube Shadowing Studio
 
+> Historical design/transition document, not current installation instructions or evidence of completed features. For current setup and known limitations, use [the project README](../README.md).
+
+
 EchoSense transforms authentic English and Japanese YouTube videos into an interactive language-learning studio where learners read synchronized bilingual transcripts with contextual vocabulary lookup and Japanese Furigana, practice speaking in Simultaneous or Listen-Then-Repeat shadowing modes, and receive multimodal AI audio and transcript feedback on their pronunciation, prosody, fluency, and content accuracy.
 
 ---

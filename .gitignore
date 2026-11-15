@@ -4,7 +4,7 @@
 
 # --- Large AI Model Weights & Checkpoints ---
 # Local LLM and Whisper model binaries (>100MB cannot be pushed to GitHub)
-models/
+/models/
 *.gguf
 *.bin
 *.safetensors
@@ -82,6 +82,13 @@ yarn-error.log*
 # Process IDs from scripts/start.sh
 .pids/
 *.pid
+
+# Durable SQLite study storage, local audio recordings, and model manifest
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+models/manifest.json
 
 # Application server logs
 logs/

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo=https://github.com/NinjaRoboticsEducation/EchoLearning.git
+repo="${ECHO_REPO_URL:-https://github.com/NinjaRoboticsEducation/EchoLearning.git}"
 destination="${1:-$PWD/EchoLearning}"
 if [[ "$(uname -s)" != Darwin ]]; then
   echo "The installer currently supports macOS." >&2
@@ -22,7 +22,7 @@ mkdir "$lock"
 stage=""
 cleanup() {
   if [[ -n "$stage" ]]; then rm -rf "$stage"; fi
-  rmdir "$lock"
+  rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -31,7 +31,7 @@ trap 'exit 143' TERM
 stage="$(mktemp -d "$parent/.echolearning-install.XXXXXX")"
 git clone --depth 1 "$repo" "$stage"
 commit="$(git -C "$stage" rev-parse HEAD)"
-echo "Installing EchoLearning at $commit. Models require approximately 9 GB of download space."
+echo "Installing EchoLearning at $commit. Whisper + Qwen3.5 models require ~5–22 GB depending on selected tier."
 "$stage/scripts/setup.sh"
 # Virtual environments contain absolute paths and must be recreated after publication.
 rm -rf "$stage/adk_backend/.venv"

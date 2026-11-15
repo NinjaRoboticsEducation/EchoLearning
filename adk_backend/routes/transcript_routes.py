@@ -9,6 +9,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -19,6 +20,7 @@ from ..agents.transcript_agent import (
     merge_caption_lines_into_complete_segments,
 )
 from ..config import TEMP_AUDIO_DIR, WHISPER_SERVER_URL
+from ..db import save_material, update_material_segment
 from ..schemas.transcript_schemas import (
     FetchTranscriptRequest,
     RetokenizeRequest,
@@ -32,16 +34,53 @@ from ..tools.tokenizer_tools import (
 
 router = APIRouter()
 
-YOUTUBE_ID_REGEX = re.compile(r"(?:v=|youtu\.be/|embed/|shorts/|live/)?([a-zA-Z0-9_-]{11})")
+YOUTUBE_VIDEO_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{11}$")
+YOUTUBE_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtube-nocookie.com",
+    "www.youtube-nocookie.com",
+    "youtu.be",
+    "www.youtu.be",
+}
 
 
 def extract_youtube_id(input_str: str) -> str | None:
-    """Extracts 11-character YouTube video ID from URL or raw ID."""
+    """Extracts 11-character YouTube video ID from a verified YouTube URL or raw ID (C04)."""
     trimmed = (input_str or "").strip()
-    if re.fullmatch(r"[a-zA-Z0-9_-]{11}", trimmed):
+    if not trimmed:
+        return None
+    if YOUTUBE_VIDEO_ID_RE.fullmatch(trimmed):
         return trimmed
-    match = YOUTUBE_ID_REGEX.search(trimmed)
-    return match.group(1) if match else None
+
+    candidate = trimmed
+    if "://" not in candidate and any(candidate.lower().startswith(h) for h in YOUTUBE_HOSTS):
+        candidate = f"https://{candidate}"
+
+    parsed = urlparse(candidate)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").lower()
+    if host not in YOUTUBE_HOSTS:
+        return None
+
+    path_parts = [p for p in parsed.path.split("/") if p]
+    if host in ("youtu.be", "www.youtu.be"):
+        if path_parts and YOUTUBE_VIDEO_ID_RE.fullmatch(path_parts[0]):
+            return path_parts[0]
+        return None
+
+    qs_v = parse_qs(parsed.query).get("v", [])
+    if qs_v and YOUTUBE_VIDEO_ID_RE.fullmatch(qs_v[0]):
+        return qs_v[0]
+
+    if len(path_parts) >= 2 and path_parts[0] in ("embed", "shorts", "live", "v"):
+        if YOUTUBE_VIDEO_ID_RE.fullmatch(path_parts[1]):
+            return path_parts[1]
+
+    return None
 
 
 def clean_html_entities(text: str) -> str:
@@ -74,8 +113,17 @@ async def fetch_youtube_oembed(video_id: str) -> dict[str, str]:
     }
 
 
+def _parse_vtt_timestamp(ts: str) -> float:
+    parts = ts.strip().replace(",", ".").split(":")
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + float(parts[1])
+    return float(parts[0])
+
+
 def parse_timedtext_body(body: str) -> list[dict[str, Any]]:
-    """Parses JSON3 or XML timedtext caption payload into raw caption lines."""
+    """Parses JSON3, XML, or WebVTT timedtext caption payload into raw caption lines."""
     lines: list[dict[str, Any]] = []
     trimmed = body.strip()
     if not trimmed:
@@ -101,32 +149,63 @@ def parse_timedtext_body(body: str) -> list[dict[str, Any]]:
         except Exception:
             pass
 
+    if trimmed.startswith("WEBVTT"):
+        cue_blocks = re.split(r"\r?\n\r?\n+", trimmed)
+        for block in cue_blocks:
+            cue_lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+            ts_idx = next((i for i, ln in enumerate(cue_lines) if "-->" in ln), -1)
+            if ts_idx == -1:
+                continue
+            ts_match = re.search(
+                r"(\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})\s*-->\s*(\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})",
+                cue_lines[ts_idx],
+            )
+            if not ts_match:
+                continue
+            start = _parse_vtt_timestamp(ts_match.group(1))
+            end = _parse_vtt_timestamp(ts_match.group(2))
+            text = clean_html_entities(" ".join(cue_lines[ts_idx + 1 :]))
+            if text and not re.match(r"^\[.*\]$", text) and not re.match(r"^♪+$", text):
+                lines.append(
+                    {
+                        "start": start,
+                        "dur": max(0.2, end - start),
+                        "text": text,
+                    }
+                )
+        if lines:
+            return lines
+
     # XML format parsing (<text start="..." dur="..."> ... </text>)
-    for m in re.finditer(
-        r'<text\s+[^>]*start="([\d.]+)"[^>]*?(?:dur="([\d.]+)")?[^>]*>([\s\S]*?)</text>',
-        trimmed,
-    ):
-        text = clean_html_entities(m.group(3))
+    for m in re.finditer(r"<text\s+([^>]*)>([\s\S]*?)</text>", trimmed):
+        attrs, raw_text = m.group(1), m.group(2)
+        start_m = re.search(r'\bstart="([\d.]+)"', attrs)
+        if not start_m:
+            continue
+        dur_m = re.search(r'\bdur="([\d.]+)"', attrs)
+        text = clean_html_entities(raw_text)
         if text and not re.match(r"^\[.*\]$", text) and not re.match(r"^♪+$", text):
             lines.append(
                 {
-                    "start": float(m.group(1)),
-                    "dur": float(m.group(2)) if m.group(2) else 2.5,
+                    "start": float(start_m.group(1)),
+                    "dur": float(dur_m.group(1)) if dur_m else 2.5,
                     "text": text,
                 }
             )
 
     if not lines:
-        for m in re.finditer(
-            r'<p\s+[^>]*t="(\d+)"[^>]*?(?:d="(\d+)")?[^>]*>([\s\S]*?)</p>',
-            trimmed,
-        ):
-            text = clean_html_entities(m.group(3))
+        for m in re.finditer(r"<p\s+([^>]*)>([\s\S]*?)</p>", trimmed):
+            attrs, raw_text = m.group(1), m.group(2)
+            t_m = re.search(r'\bt="(\d+)"', attrs)
+            if not t_m:
+                continue
+            d_m = re.search(r'\bd="(\d+)"', attrs)
+            text = clean_html_entities(raw_text)
             if text and not re.match(r"^\[.*\]$", text) and not re.match(r"^♪+$", text):
                 lines.append(
                     {
-                        "start": int(m.group(1)) / 1000.0,
-                        "dur": int(m.group(2)) / 1000.0 if m.group(2) else 2.5,
+                        "start": int(t_m.group(1)) / 1000.0,
+                        "dur": int(d_m.group(1)) / 1000.0 if d_m else 2.5,
                         "text": text,
                     }
                 )
@@ -219,7 +298,7 @@ def extract_subtitles_with_ytdl_in_process(
                 "lines": lines,
             }
     except Exception as exc:
-        print(f"in-process yt_dlp subtitle extraction notice: {exc}")
+        print(f"in-process yt_dlp subtitle extraction notice: {exc}", file=sys.stderr)
         return {
             "title": "",
             "authorName": "",
@@ -363,20 +442,34 @@ def download_audio_with_ytdl_in_process(yt_url: str, wav_path: Path) -> bool:
             ydl.download([yt_url])
         return wav_path.exists() and wav_path.stat().st_size > 500
     except Exception as exc:
-        print(f"in-process yt_dlp notice: {exc}")
+        print(f"in-process yt_dlp notice: {exc}", file=sys.stderr)
         return False
 
 
-async def download_youtube_audio_wav(yt_url: str, wav_path: Path) -> bool:
-    """Robustly downloads YouTube audio into 16kHz WAV format.
+async def download_youtube_audio_wav(
+    yt_url: str,
+    wav_path: Path,
+    timeout_sec: float = 180.0,
+) -> bool:
+    """Robustly downloads YouTube audio into 16kHz WAV format with bounded timeouts and C12 cleanup.
 
     Strategy 1: Python in-process yt_dlp via asyncio.to_thread (requires no external yt-dlp binary in PATH).
     Strategy 2: Subprocess execution using resolved binary path (.venv/bin/yt-dlp or system PATH).
     """
     # Strategy 1: In-process yt_dlp Python library
-    success = await asyncio.to_thread(download_audio_with_ytdl_in_process, yt_url, wav_path)
-    if success and wav_path.exists():
-        return True
+    try:
+        success = await asyncio.wait_for(
+            asyncio.to_thread(download_audio_with_ytdl_in_process, yt_url, wav_path),
+            timeout=timeout_sec,
+        )
+        if success and wav_path.exists():
+            return True
+    except TimeoutError:
+        print(f"in-process yt_dlp timed out after {timeout_sec}s", file=sys.stderr)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"in-process yt_dlp async notice: {exc}", file=sys.stderr)
 
     # Strategy 2: Resolved binary in virtual environment or PATH
     yt_bin = shutil.which("yt-dlp")
@@ -386,6 +479,7 @@ async def download_youtube_audio_wav(yt_url: str, wav_path: Path) -> bool:
             yt_bin = str(venv_bin)
 
     if yt_bin and Path(yt_bin).exists():
+        proc: asyncio.subprocess.Process | None = None
         try:
             cmd = [
                 yt_bin,
@@ -403,11 +497,25 @@ async def download_youtube_audio_wav(yt_url: str, wav_path: Path) -> bool:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await proc.communicate()
+            await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
             if wav_path.exists() and wav_path.stat().st_size > 500:
                 return True
+        except TimeoutError:
+            print(f"subprocess yt-dlp timed out after {timeout_sec}s", file=sys.stderr)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            print(f"subprocess yt-dlp notice: {exc}")
+            print(f"subprocess yt-dlp notice: {exc}", file=sys.stderr)
+        finally:
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
 
     return False
 
@@ -416,13 +524,19 @@ async def download_youtube_audio_wav(yt_url: str, wav_path: Path) -> bool:
 async def retokenize_segment(req: RetokenizeRequest):
     """Retokenizes and updates Furigana when a learner edits a transcript segment inline.
 
-    Supports both Japanese (fugashi MeCab) and English (regex word boundary).
+    Supports both Japanese (fugashi MeCab) and English (regex word boundary),
+    and optionally persists the updated segment to SQLite when videoId & segmentId are supplied.
     """
     clean_text = req.text.strip()
     if not clean_text:
         raise HTTPException(status_code=400, detail="Segment text is required.")
 
     tokens_raw = tokenize_sentence(clean_text, req.language)
+    if req.videoId and req.segmentId:
+        try:
+            update_material_segment(req.videoId, req.segmentId, clean_text, tokens_raw)
+        except Exception as exc:
+            print(f"SQLite segment persist notice: {exc}", file=sys.stderr)
     tokens = [WordToken(**t) for t in tokens_raw]
     return RetokenizeResponse(tokens=tokens)
 
@@ -500,6 +614,11 @@ async def generate_transcript_stream(
             "captionNote": note,
             "segments": final_segments,
         }
+
+        try:
+            final_video = save_material(final_video)
+        except Exception as db_exc:
+            print(f"SQLite save_material notice: {db_exc}", file=sys.stderr)
 
         yield json.dumps({"type": "complete", "video": final_video}) + "\n"
         return
@@ -586,10 +705,14 @@ async def generate_transcript_stream(
                                 "captionNote": "Generated locally via Whisper Large-v3-Turbo",
                                 "segments": final_segments,
                             }
+                            try:
+                                final_video = save_material(final_video)
+                            except Exception as db_exc:
+                                print(f"SQLite save_material notice: {db_exc}", file=sys.stderr)
                             yield json.dumps({"type": "complete", "video": final_video}) + "\n"
                             return
             except Exception as w_exc:
-                print(f"whisper-server notice: {w_exc}")
+                print(f"whisper-server notice: {w_exc}", file=sys.stderr)
 
         # If audio extraction or whisper-server failed
         yield (
@@ -605,7 +728,7 @@ async def generate_transcript_stream(
             + "\n"
         )
     except Exception as exc:
-        print(f"generate_transcript_stream fallback error: {exc}")
+        print(f"generate_transcript_stream fallback error: {exc}", file=sys.stderr)
         yield (
             json.dumps(
                 {
