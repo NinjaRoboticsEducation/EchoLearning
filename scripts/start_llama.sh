@@ -43,5 +43,4 @@ exec "$LLAMA_BIN" \
   --threads 6 \
   --threads-batch 6 \
   --jinja \
-  --flash-attn \
   -ngl 0
