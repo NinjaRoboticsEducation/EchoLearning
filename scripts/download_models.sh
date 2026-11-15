@@ -199,9 +199,14 @@ resolve_selection_token() {
   esac
 }
 
+has_tty=0
+if ( : < /dev/tty ) 2>/dev/null; then
+  has_tty=1
+fi
+
 if [[ -n "$REQUESTED_MODELS" ]]; then
   IFS=',' read -ra raw_tokens <<< "$REQUESTED_MODELS"
-  for tok in "${raw_tokens[@]}"; do
+  for tok in ${raw_tokens[@]+"${raw_tokens[@]}"}; do
     idx="$(resolve_selection_token "$tok" || true)"
     if [[ -n "$idx" ]]; then
       selected_indices+=("$idx")
@@ -210,7 +215,7 @@ if [[ -n "$REQUESTED_MODELS" ]]; then
       exit 1
     fi
   done
-elif [[ "$NON_INTERACTIVE" -eq 1 || ( ! -t 0 && ! -e /dev/tty ) ]]; then
+elif [[ "$NON_INTERACTIVE" -eq 1 || ( ! -t 0 && "$has_tty" -eq 0 ) ]]; then
   # Default tier: Qwen3.5-9B-Q6_K (index 2)
   selected_indices=(2)
 else
@@ -227,10 +232,16 @@ else
     printf " %s [%d] %s%s\n" "$marker" "$((i + 1))" "${MODEL_DESCS[$i]}" "$badge"
   done
   printf "\nSelection [3]: "
-  read -r user_input < /dev/tty || user_input=""
+  if [[ "$has_tty" -eq 1 ]]; then
+    read -r user_input < /dev/tty || user_input=""
+  elif [[ -t 0 ]]; then
+    read -r user_input || user_input=""
+  else
+    user_input="3"
+  fi
   user_input="${user_input:-3}"
   IFS=',' read -ra raw_tokens <<< "$user_input"
-  for tok in "${raw_tokens[@]}"; do
+  for tok in ${raw_tokens[@]+"${raw_tokens[@]}"}; do
     idx="$(resolve_selection_token "$tok" || true)"
     if [[ -n "$idx" ]]; then
       selected_indices+=("$idx")
@@ -250,14 +261,20 @@ needed_gb=0
 if [[ ! -f "$WHISPER_FILE" ]]; then
   needed_gb=$((needed_gb + 2))
 fi
-for idx in "${selected_indices[@]}"; do
+for idx in ${selected_indices[@]+"${selected_indices[@]}"}; do
   if [[ ! -f "${MODEL_FILES[$idx]}" ]]; then
     needed_gb=$((needed_gb + MODEL_SIZES_GB[idx]))
   fi
   if [[ "$NON_INTERACTIVE" -eq 0 && "$RAM_GB" -lt 24 && "${MODEL_MIN_RAM[$idx]}" -ge 32 ]]; then
     echo "⚠️  Warning: ${MODEL_FILES[$idx]} recommends ${MODEL_MIN_RAM[$idx]} GB+ RAM, but this machine has ${RAM_GB} GB."
     printf "Continue anyway? [y/N]: "
-    read -r confirm < /dev/tty || confirm="n"
+    if [[ "$has_tty" -eq 1 ]]; then
+      read -r confirm < /dev/tty || confirm="n"
+    elif [[ -t 0 ]]; then
+      read -r confirm || confirm="n"
+    else
+      confirm="n"
+    fi
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
       echo "Aborted by user."
       exit 1
@@ -275,7 +292,7 @@ fetch_model "$WHISPER_FILE" "$WHISPER_SHA" "$WHISPER_URL"
 
 # Download & verify selected GGUF tiers
 first_selected_id=""
-for idx in "${selected_indices[@]}"; do
+for idx in ${selected_indices[@]+"${selected_indices[@]}"}; do
   if [[ -z "$first_selected_id" ]]; then
     first_selected_id="${MODEL_IDS[$idx]}"
   fi

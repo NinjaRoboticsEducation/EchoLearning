@@ -181,7 +181,37 @@ The FastAPI backend cleanly swaps the model in `llama-server` on port `8080`, ve
 
 ### Method A: One-Line Installer (Recommended for New Users)
 
-Open your macOS Terminal in the folder where you want EchoLearning installed, and paste this single command:
+The fastest and easiest way to install EchoLearning on your Mac is our automated one-line installer. It completely automates the setup from start to finish—cloning the repository, configuring Homebrew dependencies, creating the Python environment, building the frontend, and downloading your chosen local AI models.
+
+#### 🔄 Visual Installation Flowchart
+
+```mermaid
+flowchart TD
+    CMD["💻 Paste Single Terminal Command<br/><code>curl -fsSL ... | bash</code>"] --> DLOAD["1️⃣ Download Installer Script<br/><code>scripts/install.sh</code>"]
+    DLOAD --> CLONE["2️⃣ Git Clone Repository<br/>Clones into <code>./EchoLearning</code>"]
+    CLONE --> SETUP["3️⃣ Run Automated Setup (<code>setup.sh</code>)<br/>• Installs Homebrew packages: <code>ffmpeg</code>, <code>llama.cpp</code>, <code>whisper-cpp</code><br/>• Sets up Python 3.12 <code>.venv</code> & FastMCP / Google ADK 2.x<br/>• Builds Node.js / Vite web studio (<code>npm ci && npm run build</code>)"]
+    SETUP --> SELECTOR["4️⃣ Interactive AI Model Selector (<code>download_models.sh</code>)<br/>• Inspects your Mac's RAM and architecture (Intel or Apple Silicon)<br/>• Automatically downloads Whisper Large-v3-Turbo (1.51 GiB)<br/>• Interactively prompts for Qwen3.5 model tier ([1] through [5])"]
+    SELECTOR --> READY["5️⃣ Installation Complete!<br/>Ready to launch: <code>cd EchoLearning && ./scripts/start_all.sh</code>"]
+
+    classDef primary fill:#2563eb,stroke:#1d4ed8,color:#ffffff,stroke-width:2px;
+    classDef step fill:#059669,stroke:#047857,color:#ffffff,stroke-width:2px;
+    classDef ai fill:#7c3aed,stroke:#6d28d9,color:#ffffff,stroke-width:2px;
+    classDef success fill:#047857,stroke:#065f46,color:#ffffff,stroke-width:2px;
+    class CMD primary;
+    class DLOAD,CLONE,SETUP step;
+    class SELECTOR ai;
+    class READY success;
+```
+
+#### The Single Command
+
+Open your macOS Terminal in whatever folder you want EchoLearning installed (for example, your home folder `~` or projects directory) and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NinjaRoboticsEducation/EchoLearning/HEAD/scripts/install.sh | bash
+```
+
+*(Alternatively, you can also run the multi-line curl script via GitHub's raw API:)*
 
 ```bash
 bash -c '
@@ -197,20 +227,65 @@ bash -c '
 '
 ```
 
----
+#### Optional Non-Interactive & Custom Model Options
 
-### Method B: Manual 3-Step Setup (For Developers)
+If you want a non-interactive installation (ideal for automated environments or if you want to skip interactive prompts), pass flags directly into the installer using `bash -s --`:
 
-If you already cloned the repository:
+```bash
+# Option 1: Automatic Default — Installs recommended Qwen3.5-9B-Q6_K without prompts
+curl -fsSL https://raw.githubusercontent.com/NinjaRoboticsEducation/EchoLearning/HEAD/scripts/install.sh | bash -s -- --default
 
-#### Step 1: Run Setup
+# Option 2: Pre-Select Specific Model Tier (e.g. Tier [3] 9B-Q6_K or Tier [1] 4B for 16 GB Intel Macs)
+curl -fsSL https://raw.githubusercontent.com/NinjaRoboticsEducation/EchoLearning/HEAD/scripts/install.sh | bash -s -- --models 3
+
+# Option 3: Install Multiple Models at Once (e.g. Tier 1 and Tier 3)
+curl -fsSL https://raw.githubusercontent.com/NinjaRoboticsEducation/EchoLearning/HEAD/scripts/install.sh | bash -s -- --models 1,3
+
+# Option 4: Custom Destination Folder
+curl -fsSL https://raw.githubusercontent.com/NinjaRoboticsEducation/EchoLearning/HEAD/scripts/install.sh | bash -s -- ~/MyApps/EchoLearning
+```
+
+Once the installer finishes, start EchoLearning:
 ```bash
 cd EchoLearning
+./scripts/start_all.sh
+```
+
+---
+
+### Method B: Manual Clone & Setup (For Developers)
+
+If you prefer to clone and inspect the code before setting up:
+
+#### Step 1: Clone the Repository
+```bash
+git clone https://github.com/NinjaRoboticsEducation/EchoLearning.git
+cd EchoLearning
+```
+
+#### Step 2: Run Automated Setup
+```bash
 ./setup.sh
 ```
-*`setup.sh` installs required Homebrew formulas (`ffmpeg`, `llama-server`, `whisper-server`), sets up Python virtual environments and node dependencies, builds the web studio, and downloads your chosen AI models.*
+*`setup.sh` automatically executes 8 structured environment preparation steps:*
+1. **Operating System Check:** Confirms macOS architecture (`arm64` Apple Silicon or `x86_64` Intel).
+2. **Package Manager Check:** Confirms Homebrew is installed.
+3. **Core Dependencies:** Installs `ffmpeg`, `python3` (3.12+), and `node` (Node >= 20.19.0).
+4. **Local AI Inference Engines:** Installs Homebrew formulas `llama.cpp` (`llama-server`) and `whisper-cpp` (`whisper-server`).
+5. **Python Virtual Environment:** Creates `adk_backend/.venv` and installs Google ADK 2.x, FastMCP, `fugashi` (MeCab UniDic Japanese tokenizer), and FastAPI dependencies.
+6. **Frontend Web Studio Build:** Runs `npm ci` and compiles the React 19 / Vite frontend (`npm run build`).
+7. **Interactive AI Model Downloader:** Automatically launches `download_models.sh`! It inspects your Mac's RAM and GPU, downloads **Whisper Large-v3-Turbo** (`1.51 GiB`), and prompts you to choose your **Qwen3.5 LLM tier** (`[1]`–`[5]`).
+8. **Runtime Directory Preparation:** Prepares `.pids/`, `logs/`, and `data/audio/`.
 
-#### Step 2: Start All Services
+> [!TIP]
+> **Need to download additional models later?**  
+> You do NOT need to re-run `./setup.sh` to get other models. Simply run:
+> ```bash
+> ./scripts/download_models.sh
+> ```
+> This opens the model selector anytime so you can install lighter or larger Qwen3.5 tiers as your hardware or study needs change!
+
+#### Step 3: Start All Services
 ```bash
 ./scripts/start_all.sh
 ```
@@ -220,7 +295,7 @@ cd EchoLearning
 - 🚀 **FastAPI + Google ADK Backend** (:3000) — Studio REST API, SQLite persistence, and Streamable HTTP MCP endpoint.
 - ⚡ **Vite Dev Server** (:5173) — Interactive React 19 UI with hot-module reloading (opens automatically in your browser).
 
-#### Step 3: Open in Your Browser
+#### Step 4: Open in Your Browser
 If your browser does not open automatically, navigate to either:
 👉 **[http://localhost:5173](http://localhost:5173)** *(Vite Interactive UI)*  
 👉 **[http://127.0.0.1:3000](http://127.0.0.1:3000)** *(FastAPI Production Server)*
@@ -730,6 +805,14 @@ If you prefer answering step-by-step prompts:
 - `[4] Custom Selection (Choose each component interactively)`
 - `[5] Cancel`
 
+> [!TIP]
+> **Terminal Directory Tip After `--remove-app-dir`:**  
+> If you run `./uninstall.sh` from inside the `EchoLearning` folder and choose to delete the application folder itself (via `--remove-app-dir` or Menu Option `[3]`/`[4]`), your current Terminal shell will point to a directory that has just been deleted. Before running the [Method A One-Line Installer](#method-a-one-line-installer-recommended-for-new-users) again or running new commands, always step back into your parent folder:
+> ```bash
+> cd ..
+> ```
+> *(The uninstaller script also displays a friendly reminder in your Terminal output right before finishing).*
+
 ---
 
 ### Safety Guarantees & Study Vault Protection
@@ -754,12 +837,20 @@ EchoLearning implements multiple layers of automated safety guards to prevent ac
 ```
 
 #### Reinstalling or Re-Activating After Cleanup
-If you previously ran `./uninstall.sh --all --keep-data` and want to start practicing again:
-```bash
-./setup.sh
-./scripts/start_all.sh
-```
-*`setup.sh` will re-create the Python virtual environment, install node dependencies, and download your chosen AI models. All your previous vocabulary cards and shadowing scores in `data/` will be immediately available in the studio!*
+
+- **If you kept the application directory** (e.g. after `./uninstall.sh --all --keep-data` or `./uninstall.sh --deps-only`):
+  ```bash
+  ./setup.sh
+  ./scripts/start_all.sh
+  ```
+  *`setup.sh` will re-create the Python virtual environment, install node dependencies, and download your chosen AI models. All your previous vocabulary cards and shadowing scores in `data/` will be immediately available in the studio!*
+
+- **If you removed the entire EchoLearning directory** (`--remove-app-dir`):
+  Remember to run `cd ..` first, then run the one-line installer:
+  ```bash
+  cd ..
+  curl -fsSL https://raw.githubusercontent.com/NinjaRoboticsEducation/EchoLearning/HEAD/scripts/install.sh | bash
+  ```
 
 ---
 

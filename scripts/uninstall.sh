@@ -587,4 +587,7 @@ if [[ "$DRY_RUN" == true ]]; then
   echo "✓ Dry-run complete. No files were modified."
 else
   echo "✓ EchoLearning uninstall/cleanup complete."
+  if [[ "$REMOVE_APP_DIR" == true ]]; then
+    echo "Note: If your terminal was inside $PROJECT_ROOT, run 'cd ..' before running new commands."
+  fi
 fi

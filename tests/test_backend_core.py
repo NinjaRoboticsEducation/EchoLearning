@@ -5,6 +5,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import pty
+import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -696,8 +700,258 @@ def test_uninstaller_script_and_system_status(client: TestClient, tmp_path: Path
         check=False,
     )
     assert full_proc.returncode == 0, full_proc.stderr
+    assert "run 'cd ..'" in full_proc.stdout
     assert not staged.exists()
     archives = list(backup_dir.glob("echolearning-study-backup-*.tar.gz"))
     assert len(archives) == 1
     with tarfile.open(archives[0], "r:gz") as tf:
         assert "data/echolearning.sqlite3" in tf.getnames()
+
+
+def test_installer_and_setup_bash32_nounset(tmp_path: Path):
+    # 1. Verify syntax of all installer/setup/downloader/uninstaller scripts under /bin/bash (Bash 3.2)
+    syntax_proc = subprocess.run(
+        [
+            "/bin/bash",
+            "-n",
+            str(ROOT_DIR / "scripts" / "install.sh"),
+            str(ROOT_DIR / "install.sh"),
+            str(ROOT_DIR / "scripts" / "setup.sh"),
+            str(ROOT_DIR / "setup.sh"),
+            str(ROOT_DIR / "scripts" / "download_models.sh"),
+            str(ROOT_DIR / "scripts" / "uninstall.sh"),
+        ],
+        cwd=str(ROOT_DIR),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert syntax_proc.returncode == 0, syntax_proc.stderr
+
+    # 2. Verify --help exits 0 for install.sh, setup.sh, and download_models.sh
+    for rel_script, expected_text in (
+        ("scripts/install.sh", "EchoLearning Automated Installer"),
+        ("scripts/setup.sh", "EchoLearning Automated Environment Setup"),
+        ("scripts/download_models.sh", "Usage: ./scripts/download_models.sh"),
+    ):
+        help_proc = subprocess.run(
+            ["/bin/bash", str(ROOT_DIR / rel_script), "--help"],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert help_proc.returncode == 0, f"{rel_script} --help failed: {help_proc.stderr}"
+        assert expected_text in help_proc.stdout
+
+    # 3. Prepare stubbed toolchain + isolated project directory for Bash 3.2 set -euo pipefail tests
+    stub_bin = tmp_path / "stub_bin"
+    stub_bin.mkdir(parents=True, exist_ok=True)
+    real_python = sys.executable
+
+    def write_stub(name: str, body: str) -> None:
+        p = stub_bin / name
+        p.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body, encoding="utf-8")
+        p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    write_stub("shasum", "exit 0\n")
+    write_stub(
+        "curl",
+        """out=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--output" || "$1" == "-o" ]]; then
+    out="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+if [[ -n "$out" ]]; then
+  printf 'STUB_MODEL_DATA' > "$out"
+fi
+exit 0
+""",
+    )
+    write_stub("brew", "exit 0\n")
+    write_stub("ffmpeg", "exit 0\n")
+    write_stub("llama-server", "exit 0\n")
+    write_stub("whisper-server", "exit 0\n")
+    write_stub("node", 'if [[ "${1:-}" == "-v" ]]; then echo "v22.0.0"; fi\nexit 0\n')
+    write_stub("npm", "exit 0\n")
+    write_stub(
+        "python3",
+        f"""if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "venv" ]]; then
+  mkdir -p "$3/bin"
+  cp "{stub_bin}/python3" "$3/bin/python"
+  chmod +x "$3/bin/python"
+  exit 0
+elif [[ "${{1:-}}" == "-m" && "${{2:-}}" == "pip" ]]; then
+  exit 0
+elif [[ "${{1:-}}" == "-m" && "${{2:-}}" == "certifi" ]]; then
+  echo "/tmp/stub-cacert.pem"
+  exit 0
+fi
+exec "{real_python}" "$@"
+""",
+    )
+
+    test_env = os.environ.copy()
+    test_env["PATH"] = f"{stub_bin}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+
+    # 3a. download_models.sh: --write-manifest-only, --models, non-TTY fallback, and interactive PTY
+    dl_proj = tmp_path / "dl_proj"
+    (dl_proj / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT_DIR / "scripts" / "download_models.sh", dl_proj / "scripts" / "download_models.sh")
+
+    wmo_proc = subprocess.run(
+        ["/bin/bash", str(dl_proj / "scripts" / "download_models.sh"), "--write-manifest-only"],
+        cwd=str(dl_proj),
+        env=test_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert wmo_proc.returncode == 0, wmo_proc.stderr
+    assert (dl_proj / "models" / "manifest.json").is_file()
+
+    models_proc = subprocess.run(
+        ["/bin/bash", str(dl_proj / "scripts" / "download_models.sh"), "--models", "1,3"],
+        cwd=str(dl_proj),
+        env=test_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert models_proc.returncode == 0, models_proc.stderr
+    manifest_13 = json.loads((dl_proj / "models" / "manifest.json").read_text(encoding="utf-8"))
+    assert set(manifest_13["installed_models"]) >= {"qwen3.5-4b-q6_k", "qwen3.5-9b-q6_k"}
+
+    # Non-TTY fallback (no --non-interactive, no /dev/tty) should default to tier 3 without hanging or unbound errors
+    dl_nontty = tmp_path / "dl_nontty"
+    (dl_nontty / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT_DIR / "scripts" / "download_models.sh", dl_nontty / "scripts" / "download_models.sh")
+    nontty_proc = subprocess.run(
+        ["/bin/bash", str(dl_nontty / "scripts" / "download_models.sh")],
+        cwd=str(dl_nontty),
+        env=test_env,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert nontty_proc.returncode == 0, nontty_proc.stderr
+    assert "unbound variable" not in nontty_proc.stderr
+    manifest_nontty = json.loads((dl_nontty / "models" / "manifest.json").read_text(encoding="utf-8"))
+    assert "qwen3.5-9b-q6_k" in manifest_nontty["installed_models"]
+
+    # Interactive PTY prompt test under /bin/bash
+    dl_pty = tmp_path / "dl_pty"
+    (dl_pty / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT_DIR / "scripts" / "download_models.sh", dl_pty / "scripts" / "download_models.sh")
+    master_fd, slave_fd = pty.openpty()
+    try:
+        pty_proc = subprocess.Popen(
+            ["/bin/bash", str(dl_pty / "scripts" / "download_models.sh")],
+            cwd=str(dl_pty),
+            env=test_env,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        os.close(slave_fd)
+
+    os.write(master_fd, b"1\n")
+    pty_chunks: list[bytes] = []
+    while True:
+        try:
+            chunk = os.read(master_fd, 4096)
+            if not chunk:
+                break
+            pty_chunks.append(chunk)
+        except OSError:
+            break
+    os.close(master_fd)
+    pty_rc = pty_proc.wait(timeout=15)
+    pty_out = b"".join(pty_chunks).decode("utf-8", errors="replace")
+    assert pty_rc == 0, pty_out
+    assert "unbound variable" not in pty_out
+    manifest_pty = json.loads((dl_pty / "models" / "manifest.json").read_text(encoding="utf-8"))
+    assert "qwen3.5-4b-q6_k" in manifest_pty["installed_models"]
+
+    # 3b. setup.sh with NO args (empty dl_args) under /bin/bash 3.2 set -euo pipefail
+    setup_proj = tmp_path / "setup_proj"
+    (setup_proj / "scripts").mkdir(parents=True, exist_ok=True)
+    (setup_proj / "adk_backend").mkdir(parents=True, exist_ok=True)
+    (setup_proj / "adk_backend" / "requirements.txt").write_text("", encoding="utf-8")
+    shutil.copy2(ROOT_DIR / "scripts" / "setup.sh", setup_proj / "scripts" / "setup.sh")
+    shutil.copy2(ROOT_DIR / "scripts" / "download_models.sh", setup_proj / "scripts" / "download_models.sh")
+
+    setup_proc = subprocess.run(
+        ["/bin/bash", str(setup_proj / "scripts" / "setup.sh")],
+        cwd=str(setup_proj),
+        env=test_env,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert setup_proc.returncode == 0, setup_proc.stderr + "\n" + setup_proc.stdout
+    assert "unbound variable" not in setup_proc.stderr
+    assert (setup_proj / "adk_backend" / ".venv" / ".echo-location").read_text(encoding="utf-8").strip() == str(
+        setup_proj.resolve()
+    )
+
+    # 3c. install.sh: deleted-cwd detection + end-to-end local git clone with preserved .venv
+    deleted_cwd = tmp_path / "deleted_cwd"
+    deleted_cwd.mkdir(parents=True, exist_ok=True)
+    gone_proc = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f'cd "{deleted_cwd}" && rmdir "{deleted_cwd}" && exec /bin/bash "{ROOT_DIR / "scripts" / "install.sh"}"',
+        ],
+        env=test_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert gone_proc.returncode != 0
+    assert "cd .." in gone_proc.stderr
+
+    src_repo = tmp_path / "src_repo"
+    (src_repo / "scripts").mkdir(parents=True, exist_ok=True)
+    (src_repo / "adk_backend").mkdir(parents=True, exist_ok=True)
+    (src_repo / "adk_backend" / "requirements.txt").write_text("", encoding="utf-8")
+    shutil.copy2(ROOT_DIR / "scripts" / "setup.sh", src_repo / "scripts" / "setup.sh")
+    shutil.copy2(ROOT_DIR / "scripts" / "download_models.sh", src_repo / "scripts" / "download_models.sh")
+    subprocess.run(["git", "init", "-q"], cwd=str(src_repo), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(src_repo), check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(src_repo), check=True)
+    subprocess.run(["git", "add", "."], cwd=str(src_repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(src_repo), check=True)
+
+    install_dest = tmp_path / "installed_echo"
+    install_env = test_env.copy()
+    install_env["ECHO_REPO_URL"] = src_repo.as_uri()
+    install_proc = subprocess.run(
+        ["/bin/bash", str(ROOT_DIR / "scripts" / "install.sh"), "--non-interactive", str(install_dest)],
+        cwd=str(tmp_path),
+        env=install_env,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        capture_output=True,
+        text=True,
+        timeout=25,
+        check=False,
+    )
+    assert install_proc.returncode == 0, install_proc.stderr + "\n" + install_proc.stdout
+    assert (install_dest / "adk_backend" / ".venv" / "bin" / "python").is_file()
+    assert (install_dest / ".installed-commit").is_file()
+    assert "./scripts/start_all.sh" in install_proc.stdout

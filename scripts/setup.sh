@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'echo "❌ EchoLearning setup failed at line $LINENO (command: $BASH_COMMAND)." >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -7,18 +8,42 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NON_INTERACTIVE_FLAG=""
 MODELS_ARGS=()
 
+usage() {
+  cat <<'EOF'
+EchoLearning Automated Environment Setup (macOS)
+
+Usage:
+  ./setup.sh [OPTIONS]
+  ./scripts/setup.sh [OPTIONS]
+
+Options:
+  --non-interactive, --default  Use default/recommended model (Qwen3.5-9B-Q6_K) without prompting
+  --models <list>               Comma-separated model IDs or menu numbers (e.g. "1,3" or "qwen3.5-4b-q6_k")
+  -h, --help                    Show this help message and exit
+EOF
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
     --non-interactive|--default)
       NON_INTERACTIVE_FLAG="--non-interactive"
       shift
       ;;
     --models)
-      MODELS_ARGS=("--models" "${2:-}")
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "Error: --models requires a value." >&2
+        exit 1
+      fi
+      MODELS_ARGS=("--models" "$2")
       shift 2
       ;;
     *)
-      shift
+      echo "Error: Unknown option '$1'. Run with --help for usage." >&2
+      exit 1
       ;;
   esac
 done
@@ -113,6 +138,7 @@ echo "✓ CA Certificates verified at: $CERT_PATH"
 
 echo "Installing backend requirements..."
 "$VENV_DIR/bin/python" -m pip install -r "$PROJECT_ROOT/adk_backend/requirements.txt"
+printf '%s\n' "$PROJECT_ROOT" > "$VENV_DIR/.echo-location"
 echo "✓ Python backend dependencies installed."
 
 # 6. Setup Frontend Dependencies
@@ -131,13 +157,17 @@ chmod +x "$PROJECT_ROOT/scripts/"*.sh
 
 if [[ "${ECHO_SETUP_RUNTIME_ONLY:-0}" != 1 ]]; then
   dl_args=()
-  if [[ -n "$NON_INTERACTIVE_FLAG" ]]; then
+  if [[ -n "${NON_INTERACTIVE_FLAG:-}" ]]; then
     dl_args+=("$NON_INTERACTIVE_FLAG")
   fi
   if [[ ${#MODELS_ARGS[@]} -gt 0 ]]; then
     dl_args+=("${MODELS_ARGS[@]}")
   fi
-  "$SCRIPT_DIR/download_models.sh" "${dl_args[@]}"
+  if [[ ${#dl_args[@]} -gt 0 ]]; then
+    "$SCRIPT_DIR/download_models.sh" "${dl_args[@]}"
+  else
+    "$SCRIPT_DIR/download_models.sh"
+  fi
 fi
 printf '%s\n' "$PROJECT_ROOT" > "$VENV_DIR/.echo-location"
 
@@ -149,5 +179,5 @@ echo "==========================================================================
 echo "🎉 Setup Complete! You are ready to launch Echo Language Learning."
 echo ""
 echo "To launch the entire application with one command:"
-echo "  ./scripts/start.sh"
+echo "  ./scripts/start_all.sh"
 echo "================================================================================"
