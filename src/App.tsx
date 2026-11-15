@@ -1,12 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
-  BookOpen,
+  AudioLines,
   Loader2,
-  Mic,
   Power,
-  Sparkles,
-  Video,
 } from 'lucide-react';
 import { extractYouTubeId } from './utils/youtube';
 import {
@@ -29,6 +26,8 @@ import {
   loadPracticeHistory,
   loadSavedVocabulary,
   removeVocabularyItem,
+  previewStudyBackup,
+  restoreStudyBackup,
   saveCustomVideo,
   savePracticeReport,
   saveVocabularyItem,
@@ -44,10 +43,53 @@ import {
   VocabularyVaultView,
 } from './components/VocabularyAndHistoryViews';
 
-type ActiveTab = 'studio' | 'vocabulary' | 'history';
+type ActiveTab = 'home' | 'studio' | 'vocabulary' | 'history' | 'settings';
+
+const navigation = {
+  studio: ['Practice Studio', '練習スタジオ', '練習室', '练习室'],
+  vocabulary: ['Vocabulary', '単語帳', '詞彙', '词汇'],
+  history: ['History', '履歴', '歷史紀錄', '历史记录'],
+  settings: ['Settings', '設定', '設定', '设置'],
+} as const;
+
+const locales = ['en', 'ja', 'zh-Hant', 'zh-Hans'] as const;
+const localeLabels = ['English', '日本語', '繁體中文', '简体中文'];
+
+function tabFromHash(): ActiveTab {
+  const hash = window.location.hash.slice(1);
+  return hash === 'studio' || hash === 'vocabulary' || hash === 'history' || hash === 'settings'
+    ? hash : 'home';
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('studio');
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [backup, setBackup] = useState<Awaited<ReturnType<typeof previewStudyBackup>> | null>(null);
+  const [backupStatus, setBackupStatus] = useState('');
+  const [backupError, setBackupError] = useState('');
+  const backupGeneration = useRef(0);
+
+  const [activeTab, setTab] = useState<ActiveTab>(tabFromHash);
+  const [locale, setLocale] = useState<string>(() => {
+    try {
+      return locales.find((value) => value === localStorage.getItem('echo_ui_locale')) ?? 'en';
+    } catch {
+      return 'en';
+    }
+  });
+  const localeIndex = Math.max(0, locales.findIndex((value) => value === locale));
+  const setActiveTab = (tab: ActiveTab) => {
+    window.location.hash = tab;
+    setTab(tab);
+  };
+  useEffect(() => {
+    const sync = () => setTab(tabFromHash());
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
+  useEffect(() => {
+    document.documentElement.lang = locale;
+    try { localStorage.setItem('echo_ui_locale', locale); } catch { /* Session choice still applies. */ }
+  }, [locale]);
 
   // Video & Transcript State — Starts empty with no default content or Quick Switch list
   const [customVideos, setCustomVideos] = useState<VideoMaterial[]>(() =>
@@ -61,7 +103,6 @@ export default function App() {
   const [transcriptProgressMsg, setTranscriptProgressMsg] = useState<
     string | null
   >(null);
-  const [transcriptProgressPct, setTranscriptProgressPct] = useState<number>(0);
   const [urlError, setUrlError] = useState<string | null>(null);
 
   // Playback & Sync State
@@ -120,22 +161,8 @@ export default function App() {
 
   // System Shutdown State
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
-  const [isShuttingDown, setIsShuttingDown] = useState(false);
-  const [isShutDownComplete, setIsShutDownComplete] = useState(false);
 
   const reportSectionRef = useRef<HTMLDivElement | null>(null);
-
-  const handleShutdown = async () => {
-    setIsShuttingDown(true);
-    try {
-      await fetch('/api/system/shutdown', { method: 'POST' });
-    } catch (e) {
-      console.log('Shutdown request dispatched:', e);
-    }
-    setIsShuttingDown(false);
-    setShowShutdownConfirm(false);
-    setIsShutDownComplete(true);
-  };
 
   // Synchronize activeSegmentIndex with currentTime
   useEffect(() => {
@@ -205,7 +232,6 @@ export default function App() {
 
     setIsLoadingTranscript(true);
     setTranscriptProgressMsg('Fetching YouTube video metadata & audio timeline...');
-    setTranscriptProgressPct(8);
 
     try {
       const response = await fetch('/api/transcript/fetch', {
@@ -242,6 +268,7 @@ export default function App() {
           language: preferredFetchLang,
         };
         let hasInitializedPreview = false;
+        let completed = false;
 
         while (true) {
           const { value, done } = await reader.read();
@@ -270,21 +297,7 @@ export default function App() {
               };
             } else if (event.type === 'progress') {
               setTranscriptProgressMsg(event.message || 'Transcribing video...');
-              const pct =
-                event.totalChunks > 0
-                  ? Math.round(
-                      12 + (event.completedChunks / event.totalChunks) * 80
-                    )
-                  : 20;
-              setTranscriptProgressPct(pct);
             } else if (event.type === 'partial_segments') {
-              const pct =
-                event.totalChunks > 0
-                  ? Math.round(
-                      15 + (event.completedChunks / event.totalChunks) * 82
-                    )
-                  : 50;
-              setTranscriptProgressPct(pct);
               setTranscriptProgressMsg(event.message || 'Generating segments...');
 
               const partialSegments: TranscriptSegment[] = event.segments || [];
@@ -314,7 +327,7 @@ export default function App() {
                 }
               }
             } else if (event.type === 'complete' && event.video) {
-              setTranscriptProgressPct(100);
+              completed = true;
               const updatedCustom = saveCustomVideo(event.video);
               setCustomVideos(updatedCustom);
               if (!hasInitializedPreview) {
@@ -335,6 +348,7 @@ export default function App() {
             }
           }
         }
+        if (!completed) throw new Error('The transcript stream ended before completion. Try again.');
       } else {
         const data = await response.json();
         if (!data.video) {
@@ -352,9 +366,20 @@ export default function App() {
     } finally {
       setIsLoadingTranscript(false);
       setTranscriptProgressMsg(null);
-      setTranscriptProgressPct(0);
     }
   };
+
+  function persistTranscript(video: VideoMaterial): boolean {
+    try {
+      setCustomVideos(saveCustomVideo(video));
+      setCurrentVideo(video);
+      setStorageError(null);
+      return true;
+    } catch {
+      setStorageError('The transcript change could not be saved. Check browser storage space and try again.');
+      return false;
+    }
+  }
 
   // Inline Transcript Editing Handlers
   const handleUpdateSegment = (updatedSegment: TranscriptSegment) => {
@@ -368,9 +393,7 @@ export default function App() {
       captionNote:
         'Transcript edited inline — Furigana and timestamps are synchronized.',
     };
-    setCurrentVideo(updatedVideo);
-    const updatedCustom = saveCustomVideo(updatedVideo);
-    setCustomVideos(updatedCustom);
+    persistTranscript(updatedVideo);
   };
 
   const handleAddSegmentAfter = (index: number) => {
@@ -399,8 +422,7 @@ export default function App() {
       ...currentVideo,
       segments: nextSegments,
     };
-    setCurrentVideo(updatedVideo);
-    setCustomVideos(saveCustomVideo(updatedVideo));
+    persistTranscript(updatedVideo);
   };
 
   const handleDeleteSegment = (segmentId: string) => {
@@ -412,12 +434,11 @@ export default function App() {
       ...currentVideo,
       segments: nextSegments,
     };
-    setCurrentVideo(updatedVideo);
+    if (!persistTranscript(updatedVideo)) return;
     setSelectedSegmentIds((prev) => {
       const remaining = prev.filter((id) => id !== segmentId);
       return remaining.length > 0 ? remaining : [nextSegments[0].id];
     });
-    setCustomVideos(saveCustomVideo(updatedVideo));
   };
 
   const handleSelectSegmentToSeek = (segment: TranscriptSegment) => {
@@ -586,8 +607,12 @@ export default function App() {
       timestampSec: selectedWordTimestamp,
       createdAt: new Date().toISOString(),
     };
-    const updated = saveVocabularyItem(newItem);
-    setSavedVocabulary(updated);
+    try {
+      setSavedVocabulary(saveVocabularyItem(newItem));
+      setStorageError(null);
+    } catch {
+      setStorageError('The word could not be saved. Check browser storage space and try again.');
+    }
   };
 
   const handleEvaluateShadowing = async (payload: {
@@ -622,7 +647,7 @@ export default function App() {
 
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.error || 'Evaluation request failed.');
+        throw new Error(typeof data.detail === 'string' ? data.detail : data.error || 'Evaluation request failed.');
       }
 
       const wordDiff: DiffToken[] = data.wordDiff || [];
@@ -654,10 +679,10 @@ export default function App() {
           prosody: Number(data.dimensions?.prosody) || 0,
         },
         metrics: {
-          speechRateValue: Number(data.speechRateValue) || 120,
+          speechRateValue: Number(data.speechRateValue ?? 0),
           speechRateUnit:
             currentVideo.language === 'ja' ? 'Moras/min' : 'WPM',
-          targetRateValue: Number(data.targetRateValue) || 135,
+          targetRateValue: Number(data.targetRateValue ?? 0),
           durationSec: payload.durationSec,
           targetDurationSec: payload.targetDurationSec,
           omittedCount,
@@ -714,140 +739,35 @@ export default function App() {
       )
   );
 
-  if (isShutDownComplete) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white p-6">
-        <div className="max-w-md w-full bg-slate-800 border border-slate-700 rounded-2xl p-8 text-center shadow-2xl">
-          <div className="w-16 h-16 bg-emerald-500/10 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-5 border border-emerald-500/20">
-            <Power className="w-8 h-8" />
-          </div>
-          <h1 className="text-xl font-bold mb-2 font-display">Echo Has Shut Down</h1>
-          <p className="text-sm text-slate-300 mb-6 leading-relaxed">
-            All local AI servers (Qwen3.5 LLM, Whisper STT, Google ADK Backend) have been safely stopped and system RAM (~9.5 GB) has been released.
-          </p>
-          <div className="p-3 bg-slate-900/60 rounded-xl text-xs text-slate-400 mb-6 border border-slate-700/50">
-            To start Echo again, run <code className="text-emerald-400 font-mono">./scripts/start.sh</code> in your terminal.
-          </div>
-          <p className="text-xs text-slate-400">You can now safely close this browser tab.</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F172A]">
-      {/* Strict 3-Zone Top Navigation Bar Contract */}
-      <header className="flex items-center justify-between gap-8 px-6 py-4 bg-white border-b border-slate-200 sticky top-0 z-30">
-        {/* Zone 1: Single text element wordmark */}
-        <a
-          href="#studio"
-          onClick={(e) => {
-            e.preventDefault();
-            setActiveTab('studio');
-          }}
-          className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display"
-        >
-          Echo Language Learning
-        </a>
-
-        {/* Zone 2: Clean single-line text navigation links */}
-        <nav className="flex items-center gap-6 text-sm font-medium text-slate-600 overflow-x-auto">
-          <button
-            type="button"
-            onClick={() => setActiveTab('studio')}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 cursor-pointer pb-0.5 border-b-2 ${
-              activeTab === 'studio'
-                ? 'text-slate-900 border-sky-600 font-semibold'
-                : 'border-transparent'
-            }`}
-          >
-            Practice Studio
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('vocabulary')}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 cursor-pointer pb-0.5 border-b-2 ${
-              activeTab === 'vocabulary'
-                ? 'text-slate-900 border-sky-600 font-semibold'
-                : 'border-transparent'
-            }`}
-          >
-            Vocabulary Vault ({savedVocabulary.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('history')}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 cursor-pointer pb-0.5 border-b-2 ${
-              activeTab === 'history'
-                ? 'text-slate-900 border-sky-600 font-semibold'
-                : 'border-transparent'
-            }`}
-          >
-            Session History ({practiceHistory.length})
-          </button>
+    <div className="echo-app">
+      <a className="skip-link" href="#main-content" onClick={(event) => {
+        event.preventDefault();
+        document.getElementById('main-content')?.focus();
+      }}>Skip to content</a>
+      <header className="echo-header">
+        <a href="#home" className="echo-brand"><AudioLines aria-hidden="true" />EchoLearning</a>
+        <nav aria-label="Main navigation">
+          {Object.entries(navigation).map(([tab, labels]) => (
+            <a key={tab} href={`#${tab}`} aria-current={activeTab === tab ? 'page' : undefined}>
+              {labels[localeIndex]}
+            </a>
+          ))}
         </nav>
-
-        {/* Zone 3: Actions */}
-        <div className="flex items-center gap-2.5 shrink-0">
-          <button
-            type="button"
-            onClick={() =>
-              exportAllStudyDataJson(savedVocabulary, practiceHistory)
-            }
-            className="px-3.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 border border-slate-200 rounded-lg hover:bg-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Export Study Data
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowShutdownConfirm(true)}
-            title="Shut Down Local AI Servers and Release RAM"
-            className="px-3 py-1.5 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5"
-          >
-            <Power className="w-3.5 h-3.5 text-rose-600" />
-            Shut Down
-          </button>
+        <div className="echo-header-actions">
+          <select aria-label="Interface language" value={locale} onChange={(event) => setLocale(event.target.value)}>
+            {locales.map((value, index) => <option key={value} value={value} lang={value}>{localeLabels[index]}</option>)}
+          </select>
+          <button type="button" onClick={() => setShowShutdownConfirm(true)}><Power aria-hidden="true" /> Shut down</button>
         </div>
       </header>
-
-      {/* Shutdown Confirmation Modal */}
       {showShutdownConfirm && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 text-center animate-in fade-in zoom-in-95 duration-150">
-            <div className="w-12 h-12 bg-rose-50 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-4 border border-rose-100">
-              <Power className="w-6 h-6" />
-            </div>
-            <h3 className="text-base font-bold text-slate-900 mb-2">Shut Down Echo?</h3>
-            <p className="text-xs text-slate-600 mb-6 leading-relaxed">
-              This will safely stop all local AI servers (Qwen3.5 LLM, Whisper STT, Google ADK Backend) and release ~9.5 GB of system RAM.
-            </p>
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                disabled={isShuttingDown}
-                onClick={() => setShowShutdownConfirm(false)}
-                className="flex-1 px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isShuttingDown}
-                onClick={handleShutdown}
-                className="flex-1 px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors cursor-pointer flex items-center justify-center gap-2"
-              >
-                {isShuttingDown ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Stopping...
-                  </>
-                ) : (
-                  'Shut Down'
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
+        <dialog ref={(node) => { if (node && !node.open) node.showModal(); }}
+          aria-labelledby="shutdown-title" onCancel={() => setShowShutdownConfirm(false)}>
+          <h2 id="shutdown-title">Stop EchoLearning?</h2>
+          <p>Run <code>./scripts/stop.sh</code> in the EchoLearning folder to stop the local app and its services.</p>
+          <button autoFocus type="button" onClick={() => setShowShutdownConfirm(false)}>Close</button>
+        </dialog>
       )}
 
       {/* Non-blocking Floating Dictionary Window */}
@@ -865,165 +785,58 @@ export default function App() {
         onSaveWord={handleSaveVocabularyWord}
       />
 
-      {/* Main Content Container (1440px Desktop Baseline) */}
-      <main className="flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6">
-        {activeTab === 'studio' && (
-          <div className="space-y-6">
-            {/* Top Workspace Bar: Automatic YouTube URL Transcript Generation */}
-            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
-              <form
-                onSubmit={handleUrlSubmit}
-                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5"
-              >
-                <div className="relative flex-1">
-                  <Video className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={urlInput}
-                    onChange={(e) => setUrlInput(e.target.value)}
-                    placeholder="Paste any English or Japanese YouTube URL (e.g., https://www.youtube.com/watch?v=...) to auto-generate its full transcript"
-                    className="w-full pl-10 pr-3 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:bg-white focus:border-sky-600"
-                  />
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
-                    <button
-                      type="button"
-                      onClick={() => setPreferredFetchLang('en')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        preferredFetchLang === 'en'
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      English (EN)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPreferredFetchLang('ja')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        preferredFetchLang === 'ja'
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      日本語 (JA)
-                    </button>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={isLoadingTranscript}
-                    className="flex items-center gap-1.5 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-                  >
-                    {isLoadingTranscript ? (
-                      <>
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        <span>Generating Complete Transcript...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-3.5 h-3.5" />
-                        <span>Auto-Generate Transcript</span>
-                      </>
-                    )}
+      <main className="echo-main" id="main-content" tabIndex={-1}>
+        {storageError && <p className="echo-error" role="alert">{storageError}</p>}
+        {(activeTab === 'home' || (activeTab === 'studio' && !currentVideo && !latestReport)) && (
+          <section className="echo-home">
+            <h1>{['Enter a YouTube link', 'YouTube リンクを入力', '輸入 YouTube 連結', '输入 YouTube 链接'][localeIndex]}</h1>
+            <p>{[
+              'Choose an English or Japanese video to prepare a synchronized transcript for shadowing practice.',
+              '英語または日本語の動画を選び、シャドーイング用の同期字幕を作成します。',
+              '選擇英文或日文影片，建立跟讀練習用的同步逐字稿。',
+              '选择英文或日文视频，生成跟读练习所需的同步字幕。',
+            ][localeIndex]}</p>
+            <form className="echo-panel echo-import" onSubmit={handleUrlSubmit}>
+              <label htmlFor="video-url">{['YouTube link', 'YouTube リンク', 'YouTube 連結', 'YouTube 链接'][localeIndex]}</label>
+              <input id="video-url" value={urlInput} onChange={(event) => setUrlInput(event.target.value)}
+                placeholder="https://youtu.be/…" required disabled={isLoadingTranscript} />
+              <div className="echo-choice" role="group" aria-label="Content language">
+                {(['ja', 'en'] as const).map((language) => (
+                  <button key={language} type="button" aria-pressed={preferredFetchLang === language}
+                    disabled={isLoadingTranscript} onClick={() => setPreferredFetchLang(language)}>
+                    {language === 'ja' ? '日本語コンテンツ' : 'English content'}
                   </button>
-                </div>
-              </form>
-
-              {/* Live Streaming Progress Bar During Full-Video Transcript Generation */}
-              {isLoadingTranscript && transcriptProgressMsg && (
-                <div className="pt-1 space-y-1.5">
-                  <div className="flex items-center justify-between text-xs text-slate-600">
-                    <span className="flex items-center gap-2 font-medium text-sky-900">
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-600 shrink-0" />
-                      <span>{transcriptProgressMsg}</span>
-                    </span>
-                    <span className="font-mono-tabular font-semibold text-sky-700">
-                      {transcriptProgressPct}%
-                    </span>
-                  </div>
-                  <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-sky-600 transition-all duration-300"
-                      style={{ width: `${Math.max(5, transcriptProgressPct)}%` }}
-                    />
-                  </div>
-                </div>
+                ))}
+              </div>
+              {isLoadingTranscript && <div role="status" className="echo-progress"><Loader2 className="size-4 animate-spin" />{transcriptProgressMsg}</div>}
+              {urlError && <p role="alert" className="echo-error">{urlError}</p>}
+              <button className="echo-primary" type="submit" disabled={isLoadingTranscript}>
+                {['Generate Learning Transcript', '練習用字幕を作成', '產生練習逐字稿', '生成练习字幕'][localeIndex]}
+              </button>
+              {customVideos.length > 0 && (
+                <details>
+                  <summary>Recent materials</summary>
+                  <ul>{customVideos.map((video) => (
+                    <li key={video.videoId}><button type="button" disabled={isLoadingTranscript}
+                      onClick={() => handleLoadVideoMaterial(video)}>{video.title}</button></li>
+                  ))}</ul>
+                </details>
               )}
-            </div>
-
-            {urlError && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-800">
-                <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
-                <span>{urlError}</span>
-              </div>
-            )}
-
-            {!currentVideo ? (
-              /* Clean Empty State before user enters a YouTube URL */
-              <div className="bg-white border border-slate-200 rounded-xl p-12 text-center max-w-2xl mx-auto my-8 space-y-4">
-                <div className="w-12 h-12 rounded-xl bg-sky-50 border border-sky-100 text-sky-600 flex items-center justify-center mx-auto">
-                  <Video className="w-6 h-6" />
-                </div>
-                <div className="space-y-1.5">
-                  <h1 className="text-xl font-bold text-slate-900">
-                    Enter a YouTube Video URL to Start Shadowing
-                  </h1>
-                  <p className="text-sm text-slate-600 leading-relaxed">
-                    Paste any English or Japanese YouTube video link above and
-                    click{' '}
-                    <strong className="text-slate-900">
-                      Auto-Generate Transcript
-                    </strong>
-                    . Echo Language Learning will automatically generate the
-                    complete synchronized transcript from start to finish,
-                    annotate Japanese Kanji with Furigana, and prepare the AI
-                    shadowing studio.
-                  </p>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-4 text-left text-xs text-slate-600">
-                  <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-lg space-y-1">
-                    <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-sky-600" />
-                      <span>1. Full Sync &amp; Inline Edit</span>
-                    </div>
-                    <p>
-                      Read synchronized transcripts with Japanese Furigana and
-                      edit any line directly in the reader.
-                    </p>
-                  </div>
-                  <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-lg space-y-1">
-                    <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-sky-600" />
-                      <span>2. Floating Dictionary</span>
-                    </div>
-                    <p>
-                      Click any unfamiliar word to open a floating contextual
-                      dictionary without interrupting playback.
-                    </p>
-                  </div>
-                  <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-lg space-y-1">
-                    <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                      <Mic className="w-3.5 h-3.5 text-sky-600" />
-                      <span>3. AI Speech Coaching</span>
-                    </div>
-                    <p>
-                      Practice in Listen-Then-Repeat or Simultaneous mode and
-                      receive 4-pillar pronunciation feedback.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <>
+            </form>
+          </section>
+        )}
+        {activeTab === 'studio' && !currentVideo && latestReport && (
+          <section ref={reportSectionRef}>
+            <p role="status" className="echo-progress">The original material is unavailable. You can still review this report.</p>
+            <PerformanceReport report={latestReport} />
+          </section>
+        )}
+        {activeTab === 'studio' && currentVideo && (
+          <div className="space-y-4">
                 {/* Video Metadata & Transcript Accuracy Notice (Unboxed Zero-Pill Metadata) */}
                 <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-slate-500">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-semibold text-slate-900 text-sm">
-                      {currentVideo.title}
-                    </span>
+                    <h1 className="echo-video-title">{currentVideo.title}</h1>
                     <span aria-hidden="true">·</span>
                     <span>{currentVideo.channel}</span>
                     <span aria-hidden="true">·</span>
@@ -1040,11 +853,11 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Two-Zone Sandbox Layout: Left (60% / 7 cols) Stage + Right (40% / 5 cols) Transcript Reader */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                <div className="echo-studio">
                   {/* LEFT ZONE: Video Player Stage + AI Shadowing Practice Studio */}
-                  <div className="lg:col-span-7 space-y-5">
+                  <div className="echo-media space-y-2">
                     <YouTubePlayer
+                      key={currentVideo.videoId}
                       videoId={currentVideo.videoId}
                       currentTime={currentTime}
                       isPlaying={isPlaying}
@@ -1066,6 +879,7 @@ export default function App() {
 
                     {activeSegment && (
                       <ShadowingStudio
+                        key={currentVideo.videoId}
                         language={currentVideo.language}
                         mode={shadowingMode}
                         allSegments={currentVideo.segments}
@@ -1092,7 +906,7 @@ export default function App() {
                   </div>
 
                   {/* RIGHT ZONE: Synchronized Interactive Transcript Reader with Direct Inline Editing */}
-                  <div className="lg:col-span-5">
+                  <div className="echo-reader">
                     <TranscriptReader
                       language={currentVideo.language}
                       segments={currentVideo.segments}
@@ -1145,8 +959,6 @@ export default function App() {
                     />
                   </div>
                 )}
-              </>
-            )}
           </div>
         )}
 
@@ -1154,7 +966,14 @@ export default function App() {
         {activeTab === 'vocabulary' && (
           <VocabularyVaultView
             items={savedVocabulary}
-            onRemoveItem={(id) => setSavedVocabulary(removeVocabularyItem(id))}
+            onRemoveItem={(id) => {
+              try {
+                setSavedVocabulary(removeVocabularyItem(id));
+                setStorageError(null);
+              } catch {
+                setStorageError('The word could not be removed. Try again.');
+              }
+            }}
             onExportCsv={() => exportVocabularyToCsv(savedVocabulary)}
             onJumpToVideoSegment={(videoId, timestampSec) => {
               const targetVid = customVideos.find((v) => v.videoId === videoId);
@@ -1173,15 +992,29 @@ export default function App() {
         {activeTab === 'history' && (
           <SessionHistoryView
             reports={practiceHistory}
-            onDeleteReport={(id) =>
-              setPracticeHistory(deletePracticeReport(id))
-            }
+            onDeleteReport={(id) => {
+              try {
+                setPracticeHistory(deletePracticeReport(id));
+                setStorageError(null);
+              } catch {
+                setStorageError('The report could not be removed. Try again.');
+              }
+            }}
             onSelectReportForReview={(rep) => {
               const targetVid = customVideos.find(
                 (v) => v.videoId === rep.videoId
               );
               if (targetVid) {
-                setCurrentVideo(targetVid);
+                handleLoadVideoMaterial(targetVid);
+                setShadowingMode(rep.mode);
+                const segments = targetVid.segments.filter((segment) => rep.segmentIds.includes(segment.id));
+                if (segments.length > 0) {
+                  setActiveSegmentIndex(segments[0].index);
+                  setCurrentTime(segments[0].startTime);
+                  setSelectedSegmentIds(segments.map((segment) => segment.id));
+                }
+              } else {
+                setCurrentVideo(null);
               }
               setLatestReport(rep);
               setActiveDiffMap({ latest: rep.wordDiff });
@@ -1196,36 +1029,72 @@ export default function App() {
             }}
           />
         )}
+        {activeTab === 'settings' && (
+          <section>
+            <h1 className="echo-page-title">{navigation.settings[localeIndex]}</h1>
+            <div className="echo-settings">
+              <section className="echo-panel">
+                <h2>Study backup</h2>
+                <p>Save or restore vocabulary, transcripts and report details. JSON backups exclude audio.</p>
+                <button type="button" className="echo-primary" onClick={() => {
+                  try {
+                    exportAllStudyDataJson(savedVocabulary, practiceHistory);
+                    setBackupError('');
+                  } catch {
+                    setBackupError('The backup could not be generated. Check your browser storage.');
+                  }
+                }}>Generate backup</button>
+                <div className="echo-restore">
+                  <label htmlFor="backup-file">Restore backup</label>
+                  <input id="backup-file" type="file" accept=".json,application/json" onChange={async (event) => {
+                    const file = event.currentTarget.files?.[0];
+                    event.currentTarget.value = '';
+                    const generation = ++backupGeneration.current;
+                    setBackup(null);
+                    setBackupError('');
+                    setBackupStatus('');
+                    if (!file) return;
+                    try {
+                      const preview = await previewStudyBackup(file);
+                      if (generation === backupGeneration.current) setBackup(preview);
+                    } catch (error) {
+                      if (generation === backupGeneration.current) {
+                        setBackupError(error instanceof SyntaxError ? 'Choose a valid JSON backup.' :
+                          error instanceof Error ? error.message : 'Unable to read the backup.');
+                      }
+                    }
+                  }} />
+                  {backup && (
+                    <div>
+                      <p>{backup.vocabulary.length} words, {backup.materials.length} materials, {backup.history.length} reports. Existing records take precedence when IDs match.</p>
+                      <button className="echo-primary" type="button" onClick={() => {
+                        try {
+                          const restored = restoreStudyBackup(backup);
+                          setSavedVocabulary(restored.vocabulary);
+                          setPracticeHistory(restored.history);
+                          setCustomVideos(restored.materials);
+                          setBackup(null);
+                          setBackupError('');
+                          setBackupStatus('Backup merged into this browser.');
+                        } catch {
+                          setBackupError('The backup could not be saved. The existing study data is unchanged.');
+                        }
+                      }}>Merge backup</button>
+                      <button type="button" onClick={() => { setBackup(null); setBackupError(''); }}>Cancel</button>
+                    </div>
+                  )}
+                  {backupError && <p className="echo-error" role="alert">{backupError}</p>}
+                  {backupStatus && <p role="status">{backupStatus}</p>}
+                </div>
+              </section>
+              <section className="echo-panel">
+                <h2>Private connections</h2>
+                <dl><dt>Tailscale access</dt><dd>Unavailable in this build</dd><dt>MCP agents</dt><dd>Local clients can connect using <code>scripts/start_mcp.sh</code>.</dd></dl>
+              </section>
+            </div>
+          </section>
+        )}
       </main>
-
-      {/* Quiet Footer */}
-      <footer className="mt-12 border-t border-slate-200 bg-white px-6 py-4 text-xs text-slate-500">
-        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4">
-          <span>
-            Echo Language Learning — English &amp; Japanese YouTube Shadowing
-            Studio
-          </span>
-          <div className="flex items-center gap-4">
-            <button
-              type="button"
-              onClick={() => exportVocabularyToCsv(savedVocabulary)}
-              className="hover:text-slate-900 underline cursor-pointer"
-            >
-              Export Vocabulary CSV
-            </button>
-            <span aria-hidden="true">·</span>
-            <button
-              type="button"
-              onClick={() =>
-                exportAllStudyDataJson(savedVocabulary, practiceHistory)
-              }
-              className="hover:text-slate-900 underline cursor-pointer"
-            >
-              Backup JSON
-            </button>
-          </div>
-        </div>
-      </footer>
     </div>
   );
 }

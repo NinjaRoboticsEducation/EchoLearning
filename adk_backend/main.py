@@ -1,14 +1,12 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .config import API_PORT, PROJECT_ROOT, TEMP_AUDIO_DIR
 from .routes.dictionary_routes import router as dictionary_router
 from .routes.health_routes import router as health_router
 from .routes.shadowing_routes import router as shadowing_router
-from .routes.system_routes import router as system_router
 from .routes.transcript_routes import router as transcript_router
 from .routes.tts_routes import router as tts_router
 
@@ -28,18 +26,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enable CORS for local development across Vite (port 5173) and FastAPI (port 3000)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Register API routes under /api
 app.include_router(health_router, prefix="/api", tags=["Health"])
-app.include_router(system_router, prefix="/api", tags=["System"])
 app.include_router(transcript_router, prefix="/api", tags=["Transcript"])
 app.include_router(dictionary_router, prefix="/api", tags=["Dictionary"])
 app.include_router(shadowing_router, prefix="/api", tags=["Shadowing"])

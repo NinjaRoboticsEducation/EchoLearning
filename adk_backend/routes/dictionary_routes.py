@@ -1,3 +1,4 @@
+import hashlib
 import re
 from typing import Any
 
@@ -25,7 +26,8 @@ async def dictionary_lookup(req: DictionaryRequest):
         raise HTTPException(status_code=400, detail="Word is required for lookup.")
 
     clean_word = PUNCT_STRIP_REGEX.sub("", raw_word).strip() or raw_word
-    cache_key = f"{req.language}:{clean_word.lower()}:{req.sentence[:32].strip()}"
+    context = hashlib.sha256(req.sentence.strip().encode()).hexdigest()
+    cache_key = f"{req.language}:{clean_word.lower()}:{context}"
 
     if cache_key in _dictionary_cache:
         return _dictionary_cache[cache_key]
@@ -37,7 +39,7 @@ async def dictionary_lookup(req: DictionaryRequest):
             language=req.language,
         )
         # Store in cache (cap at 500 items to prevent memory bloat)
-        if len(_dictionary_cache) > 500:
+        if len(_dictionary_cache) >= 500:
             _dictionary_cache.pop(next(iter(_dictionary_cache)))
         _dictionary_cache[cache_key] = result
         return result

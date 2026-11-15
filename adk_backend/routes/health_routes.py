@@ -32,8 +32,10 @@ async def health_check():
         except Exception:
             pass
 
+    ready = services["llamaServer"] == "online" and services["whisperServer"] == "online"
     return {
         "status": "ok",
+        "ready": ready,
         "framework": "Google ADK 2.x",
         "services": services,
     }

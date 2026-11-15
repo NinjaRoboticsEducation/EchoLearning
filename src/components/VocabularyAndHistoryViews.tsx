@@ -145,7 +145,7 @@ export const VocabularyVaultView: React.FC<VocabularyVaultViewProps> = ({
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {filtered.map((item) => (
             <div
               key={item.id}
@@ -239,6 +239,8 @@ export const SessionHistoryView: React.FC<SessionHistoryViewProps> = ({
   onDeleteReport,
   onSelectReportForReview,
 }) => {
+  const [filter, setFilter] = useState<'all' | LanguageCode>('all');
+  const visibleReports = reports.filter((report) => filter === 'all' || report.language === filter);
   const avgScore =
     reports.length > 0
       ? Math.round(reports.reduce((acc, r) => acc + r.overallScore, 0) / reports.length)
@@ -275,10 +277,18 @@ export const SessionHistoryView: React.FC<SessionHistoryViewProps> = ({
         )}
       </div>
 
-      {reports.length === 0 ? (
+      <div className="echo-choice" role="group" aria-label="Filter history by language">
+        {(['all', 'en', 'ja'] as const).map((language) => (
+          <button key={language} type="button" aria-pressed={filter === language}
+            onClick={() => setFilter(language)}>
+            {language === 'all' ? 'All' : language === 'en' ? 'English' : 'Japanese'}
+          </button>
+        ))}
+      </div>
+      {visibleReports.length === 0 ? (
         <div className="bg-white border border-slate-200 rounded-xl p-12 text-center space-y-2">
           <p className="text-sm font-semibold text-slate-800">
-            No shadowing sessions recorded yet.
+            No shadowing sessions match this view.
           </p>
           <p className="text-xs text-slate-500 max-w-md mx-auto">
             Complete a Listen-Then-Repeat or Simultaneous shadowing recording in the Practice Studio to generate your first AI diagnostic report.
@@ -286,7 +296,7 @@ export const SessionHistoryView: React.FC<SessionHistoryViewProps> = ({
         </div>
       ) : (
         <div className="space-y-3">
-          {reports.map((rep) => (
+          {visibleReports.map((rep) => (
             <div
               key={rep.id}
               className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4"
@@ -346,7 +356,7 @@ export const SessionHistoryView: React.FC<SessionHistoryViewProps> = ({
                     onClick={() => onSelectReportForReview(rep)}
                     className="px-3 py-1.5 text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white rounded-lg transition-colors cursor-pointer"
                   >
-                    Open Full Report
+                    Open Report and Try Again
                   </button>
                   <button
                     type="button"

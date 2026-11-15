@@ -74,11 +74,11 @@ class ShadowingAssessmentReport(BaseModel):
 
 
 class ShadowingEvaluateRequest(BaseModel):
-    audioBase64: str | None = None
+    audioBase64: str | None = Field(default=None, max_length=70_000_000)
     mimeType: str | None = None
-    targetText: str
+    targetText: str = Field(min_length=1, max_length=20000)
     language: LanguageCode = "en"
     mode: ShadowingMode = "listen_repeat"
     webSpeechTranscript: str | None = None
-    durationSec: float = 6.0
-    targetDurationSec: float = 6.0
+    durationSec: float = Field(default=6.0, gt=0, le=600)
+    targetDurationSec: float = Field(default=6.0, gt=0, le=3600)

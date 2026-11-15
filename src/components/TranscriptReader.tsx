@@ -133,8 +133,9 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
     const cleanedText = draftText.trim();
     if (!cleanedText) return;
 
-    const newStart = Math.max(0, parseFloat(draftStartTime) || segment.startTime);
-    const newEnd = Math.max(newStart + 0.5, parseFloat(draftEndTime) || segment.endTime);
+    const newStart = parseFloat(draftStartTime);
+    const newEnd = parseFloat(draftEndTime);
+    if (!Number.isFinite(newStart) || !Number.isFinite(newEnd) || newStart < 0 || newEnd <= newStart) return;
 
     if (cleanedText !== segment.text) {
       setIsRetokenizing(true);
@@ -197,6 +198,7 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
           {language === 'ja' && (
             <button
               type="button"
+              aria-pressed={showFurigana}
               onClick={onToggleFurigana}
               className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 showFurigana
@@ -209,6 +211,7 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
           )}
           <button
             type="button"
+            aria-pressed={autoScroll}
             onClick={onToggleAutoScroll}
             className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               autoScroll

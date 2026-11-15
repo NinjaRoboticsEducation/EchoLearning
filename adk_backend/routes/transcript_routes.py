@@ -441,10 +441,9 @@ async def generate_transcript_stream(
     channel = caption_info.get("authorName") or oembed_meta.get("authorName") or "YouTube Creator"
     duration_sec = max(15, caption_info.get("durationSec") or 180)
 
-    inferred_lang = (
-        "ja"
-        if detect_japanese_characters(title)
-        else (preferred_lang or caption_info.get("language") or "en")
+    track_language = caption_info.get("language") if caption_info.get("lines") else None
+    inferred_lang = track_language or preferred_lang or (
+        "ja" if detect_japanese_characters(title) else "en"
     )
 
     # 1. Yield 'meta' event

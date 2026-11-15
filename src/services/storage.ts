@@ -1,4 +1,4 @@
-import {
+import type {
   DictionaryLookupResult,
   SavedVocabularyItem,
   ShadowingAssessmentReport,
@@ -10,96 +10,65 @@ const HISTORY_STORAGE_KEY = 'echosense_history_v1';
 const CUSTOM_VIDEOS_KEY = 'echosense_custom_videos_v1';
 const DICT_CACHE_KEY = 'echosense_dict_cache_v1';
 
-export function loadSavedVocabulary(): SavedVocabularyItem[] {
-  try {
-    const raw = localStorage.getItem(VOCAB_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
+const STUDY_KEY = 'echolearning_study_v2';
+
+interface StudyData {
+  vocabulary: SavedVocabularyItem[];
+  history: ShadowingAssessmentReport[];
+  materials: VideoMaterial[];
 }
 
-export function saveVocabularyItem(item: SavedVocabularyItem): SavedVocabularyItem[] {
-  const existing = loadSavedVocabulary();
-  const filtered = existing.filter(
-    (v) => !(v.word.toLowerCase() === item.word.toLowerCase() && v.language === item.language)
-  );
-  const updated = [item, ...filtered];
-  try {
-    localStorage.setItem(VOCAB_STORAGE_KEY, JSON.stringify(updated));
-  } catch {
-    // Handle storage quota gracefully
-  }
+function readLegacy<T>(key: string): T[] {
+  const raw = localStorage.getItem(key);
+  const data: unknown = raw ? JSON.parse(raw) : [];
+  if (!Array.isArray(data)) throw new Error('The saved study data has an invalid format.');
+  return data;
+}
+
+function loadStudy(): StudyData {
+  const current = localStorage.getItem(STUDY_KEY);
+  if (current) return JSON.parse(current);
+  return {
+    vocabulary: readLegacy(VOCAB_STORAGE_KEY),
+    history: readLegacy(HISTORY_STORAGE_KEY),
+    materials: readLegacy(CUSTOM_VIDEOS_KEY),
+  };
+}
+
+function updateStudy<K extends keyof StudyData>(key: K, update: (items: StudyData[K]) => StudyData[K]): StudyData[K] {
+  const current = loadStudy();
+  const updated = update(current[key]);
+  localStorage.setItem(STUDY_KEY, JSON.stringify({ ...current, [key]: updated }));
   return updated;
 }
 
-export function removeVocabularyItem(id: string): SavedVocabularyItem[] {
-  const existing = loadSavedVocabulary();
-  const updated = existing.filter((v) => v.id !== id);
-  try {
-    localStorage.setItem(VOCAB_STORAGE_KEY, JSON.stringify(updated));
-  } catch {
-    // Ignore
-  }
-  return updated;
+export function loadSavedVocabulary() { return loadStudy().vocabulary; }
+export function loadPracticeHistory() { return loadStudy().history; }
+export function loadCustomVideos() { return loadStudy().materials; }
+
+function vocabularyKey(item: SavedVocabularyItem) {
+  return JSON.stringify([item.language, item.word.normalize('NFC').toLowerCase()]);
 }
 
-export function loadPracticeHistory(): ShadowingAssessmentReport[] {
-  try {
-    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
+export function saveVocabularyItem(item: SavedVocabularyItem) {
+  return updateStudy('vocabulary', (items) => [item, ...items.filter((other) => vocabularyKey(other) !== vocabularyKey(item))]);
 }
 
-export function savePracticeReport(report: ShadowingAssessmentReport): ShadowingAssessmentReport[] {
-  const existing = loadPracticeHistory();
-  // Keep up to 40 recent sessions in localStorage; trim large audioDataUrl on older entries if needed
-  const updated = [report, ...existing.filter((r) => r.id !== report.id)].slice(0, 40);
-  try {
-    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
-  } catch {
-    // If audioDataUrl exceeds localStorage quota, store without audioDataUrl on older items
-    const compact = updated.map((r, idx) => (idx > 3 ? { ...r, audioDataUrl: undefined } : r));
-    try {
-      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(compact));
-    } catch {
-      // Ignore
-    }
-  }
-  return updated;
+export function removeVocabularyItem(id: string) {
+  return updateStudy('vocabulary', (items) => items.filter((item) => item.id !== id));
 }
 
-export function deletePracticeReport(id: string): ShadowingAssessmentReport[] {
-  const existing = loadPracticeHistory();
-  const updated = existing.filter((r) => r.id !== id);
-  try {
-    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
-  } catch {
-    // Ignore
-  }
-  return updated;
+export function savePracticeReport(report: ShadowingAssessmentReport) {
+  const { audioDataUrl, ...metadata } = report;
+  return updateStudy('history', (items) => [metadata, ...items.filter((item) => item.id !== report.id)]);
 }
 
-export function loadCustomVideos(): VideoMaterial[] {
-  try {
-    const raw = localStorage.getItem(CUSTOM_VIDEOS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
+export function deletePracticeReport(id: string) {
+  return updateStudy('history', (items) => items.filter((item) => item.id !== id));
 }
 
-export function saveCustomVideo(video: VideoMaterial): VideoMaterial[] {
-  const existing = loadCustomVideos();
-  const updated = [video, ...existing.filter((v) => v.videoId !== video.videoId)].slice(0, 20);
-  try {
-    localStorage.setItem(CUSTOM_VIDEOS_KEY, JSON.stringify(updated));
-  } catch {
-    // Ignore
-  }
-  return updated;
+export function saveCustomVideo(video: VideoMaterial) {
+  return updateStudy('materials', (items) => [video, ...items.filter((item) => item.videoId !== video.videoId)]);
 }
 
 export function getCachedDictionaryLookup(key: string): DictionaryLookupResult | null {
@@ -181,6 +150,9 @@ export function exportAllStudyDataJson(
   history: ShadowingAssessmentReport[]
 ): void {
   const payload = {
+    format: 'echolearning-study',
+    schemaVersion: 2,
+    materials: loadCustomVideos(),
     exportedAt: new Date().toISOString(),
     app: 'Echo Language Learning',
     vocabularyCount: vocabulary.length,
@@ -197,4 +169,91 @@ export function exportAllStudyDataJson(
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+type RecordValue = Record<string, unknown>;
+
+function object(value: unknown): value is RecordValue {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function strings(record: RecordValue, keys: string[]): boolean {
+  return keys.every((key) => typeof record[key] === 'string');
+}
+
+function numbers(record: RecordValue, keys: string[]): boolean {
+  return keys.every((key) => typeof record[key] === 'number' && Number.isFinite(record[key]));
+}
+
+function textList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function learningLanguage(record: RecordValue) {
+  return record.language === 'ja' || record.language === 'en';
+}
+
+function validateRows<T>(value: unknown, label: string, test: (item: RecordValue) => boolean): T[] {
+  if (!Array.isArray(value) || !value.every((item) => object(item) && test(item))) {
+    throw new Error(`Invalid ${label} in the backup. No records were imported.`);
+  }
+  return value as T[];
+}
+
+export async function previewStudyBackup(file: File): Promise<StudyData> {
+  if (file.size > 10 * 1024 * 1024) throw new Error('Choose a JSON backup smaller than 10 MiB.');
+  const data: unknown = JSON.parse(await file.text());
+  if (!object(data) || !(data.format === 'echolearning-study' && data.schemaVersion === 2 ||
+    data.app === 'Echo Language Learning' && data.schemaVersion === undefined)) {
+    throw new Error('This EchoLearning backup format is unsupported.');
+  }
+
+  return {
+    vocabulary: validateRows(data.vocabulary, 'vocabulary', (row) =>
+      learningLanguage(row) &&
+      strings(row, ['id', 'word', 'lemma', 'reading', 'partOfSpeech', 'contextualMeaning', 'sourceSentence', 'videoId', 'videoTitle', 'createdAt']) &&
+      numbers(row, ['timestampSec']) && textList(row.dictionaryDefinitions) &&
+      ['romaji', 'ipa', 'pitchAccent'].every((key) => row[key] === undefined || typeof row[key] === 'string')),
+    history: validateRows<ShadowingAssessmentReport>(data.history, 'reports', (row) =>
+      learningLanguage(row) && (row.mode === 'listen_repeat' || row.mode === 'simultaneous') &&
+      strings(row, ['id', 'videoId', 'videoTitle', 'createdAt', 'targetText', 'recognizedTranscript', 'scoreExplanation']) &&
+      numbers(row, ['overallScore']) && textList(row.segmentIds) && object(row.dimensions) &&
+      numbers(row.dimensions, ['contentAccuracy', 'pronunciation', 'fluency', 'prosody']) &&
+      object(row.metrics) && numbers(row.metrics, ['speechRateValue', 'targetRateValue', 'durationSec', 'targetDurationSec', 'omittedCount', 'substitutedCount', 'uncertainSttCount']) &&
+      textList(row.improvementSuggestions) &&
+      Array.isArray(row.wordDiff) && row.wordDiff.every((token) => object(token) && strings(token, ['word', 'status'])) &&
+      Array.isArray(row.pronunciationFeedback) && row.pronunciationFeedback.every((feedback) => object(feedback) &&
+        strings(feedback, ['targetWord', 'readingOrIpa', 'category', 'observedIssue', 'actionableTip', 'severity'])))
+      .map(({ audioDataUrl, ...report }) => report),
+    materials: validateRows(data.schemaVersion === 2 ? data.materials : [], 'materials', (row) =>
+      learningLanguage(row) && strings(row, ['videoId', 'title', 'channel', 'level', 'captionSource', 'captionNote']) &&
+      typeof row.videoId === 'string' && /^[A-Za-z0-9_-]{11}$/.test(row.videoId) &&
+      numbers(row, ['durationSec']) && Array.isArray(row.segments) && row.segments.every((segment) =>
+        object(segment) && strings(segment, ['id', 'text']) && numbers(segment, ['index', 'startTime', 'endTime']) &&
+        (segment.tokens === undefined || Array.isArray(segment.tokens) && segment.tokens.every((token) =>
+          object(token) && strings(token, ['surface']) &&
+          ['reading', 'romaji', 'ipa', 'lemma', 'pos', 'meaningHint'].every((key) =>
+            token[key] == null || typeof token[key] === 'string'))))),
+  };
+}
+
+function mergeUnique<T>(current: T[], imported: T[], key: (item: T) => string): T[] {
+  const seen = new Set(current.map(key));
+  return [...current, ...imported.filter((item) => {
+    const id = key(item);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  })];
+}
+
+export function restoreStudyBackup(backup: StudyData): StudyData {
+  const current = loadStudy();
+  const merged = {
+    vocabulary: mergeUnique(current.vocabulary, backup.vocabulary, vocabularyKey),
+    history: mergeUnique(current.history, backup.history, (report) => report.id),
+    materials: mergeUnique(current.materials, backup.materials, (material) => material.videoId),
+  };
+  localStorage.setItem(STUDY_KEY, JSON.stringify(merged));
+  return merged;
 }

@@ -33,6 +33,9 @@ async def evaluate_shadowing(req: ShadowingEvaluateRequest):
             web_speech_transcript=req.webSpeechTranscript,
         )
 
+        if req.audioBase64 and not (report.get("recognizedTranscript") or "").strip():
+            raise HTTPException(status_code=422, detail="No speech could be verified. Check the recording or try again.")
+
         word_diff = report.get("wordDiff", [])
         omitted = sum(1 for t in word_diff if t.get("status") == "omitted")
         substituted = sum(1 for t in word_diff if t.get("status") == "substituted")
@@ -50,8 +53,10 @@ async def evaluate_shadowing(req: ShadowingEvaluateRequest):
         }
 
         return report
-    except Exception as exc:
+    except HTTPException:
+        raise
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to evaluate shadowing session: {exc!s}",
+            detail="The assessment service could not process this take.",
         )

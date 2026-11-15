@@ -65,6 +65,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   onAdvanceToSegmentIndex,
 }) => {
   const [sessionState, setSessionState] = useState<
+    | 'requesting_permission'
     | 'idle'
     | 'listening_to_model'
     | 'recording'
@@ -97,6 +98,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const recognitionRef = useRef<any>(null);
   const timerIntervalRef = useRef<number | null>(null);
   const startTimeMsRef = useRef<number>(0);
+  const captureGeneration = useRef(0);
   const isRecordingActiveRef = useRef<boolean>(false);
 
   // In Listen-Then-Repeat mode, focus on activeSegment;
@@ -138,6 +140,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   // Cleanup audio & speech resources on unmount
   useEffect(() => {
     return () => {
+      captureGeneration.current += 1;
       stopAllCaptureResources();
     };
   }, []);
@@ -262,6 +265,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     setMicError(null);
     setLiveTranscript('');
     setRecordingSec(0);
+    const generation = ++captureGeneration.current;
+    setSessionState('requesting_permission');
     audioChunksRef.current = [];
 
     try {
@@ -272,6 +277,10 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           autoGainControl: true,
         },
       });
+      if (generation !== captureGeneration.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return false;
+      }
       streamRef.current = stream;
 
       // Setup Web Audio API AnalyserNode for live waveform
@@ -307,6 +316,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       };
 
       recorder.onstop = () => {
+        if (generation !== captureGeneration.current) return;
         const blob = new Blob(audioChunksRef.current, {
           type: recorder.mimeType || 'audio/webm',
         });
@@ -315,7 +325,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
 
         const reader = new FileReader();
         reader.onloadend = () => {
-          const dataUrl = reader.result as string;
+          if (generation !== captureGeneration.current) return;
+          const dataUrl = typeof reader.result === 'string' ? reader.result : '';
           const base64 = dataUrl.includes(',')
             ? dataUrl.split(',')[1]
             : undefined;
@@ -340,6 +351,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       startWebSpeechRecognition();
       return true;
     } catch (err: any) {
+      if (generation !== captureGeneration.current) return false;
+      stopAllCaptureResources();
       setSessionState('idle');
       onSetAutoPauseAtSec(null);
       setMicError(
@@ -590,6 +603,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
           <button
             type="button"
+            disabled={isEvaluating || !['idle', 'recorded_ready'].includes(sessionState)}
             onClick={() => {
               onSetAutoPauseAtSec(null);
               setCapturedSimultaneousSegments(null);
@@ -606,6 +620,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           </button>
           <button
             type="button"
+            disabled={isEvaluating || !['idle', 'recorded_ready'].includes(sessionState)}
             onClick={() => {
               // Ensure no single-sentence auto-pause or loop blocks continuous playback
               onSetAutoPauseAtSec(null);
@@ -735,7 +750,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
                     {liveTranscript ||
                       (speechApiSupported
                         ? 'Listening for spoken words...'
-                        : 'Browser live preview unavailable — full audio is being recorded for server-side Gemini transcription.')}
+                        : 'Browser live preview unavailable — full audio is being recorded for local Whisper transcription.')}
                   </span>
                 </div>
               </div>

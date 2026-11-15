@@ -246,23 +246,26 @@ If you prefer inspecting logs in individual terminal tabs:
 
 ---
 
-## 🛑 How to Shut Down the Application & Release RAM
+## Stop EchoLearning
 
-When you have finished practicing and want to release your computer's RAM (~9.5 GB) and GPU resources:
+Press Ctrl+C in the launcher terminal, or run `./scripts/stop.sh` from this checkout. The launcher refuses occupied ports and stops its own children.
 
-1. **Via the Web UI (Easiest):**
-   - Click the red **"Shut Down"** button in the top-right header next to *"Export Study Data"*.
-   - A confirmation dialog will appear. Click *"Shut Down"*.
-   - All 4 local servers will be gracefully terminated and a confirmation screen will appear letting you know it is safe to close the tab.
+## Installation and study backups
 
-2. **Via the Terminal (CLI):**
-   - If using `./scripts/start.sh`, press `Ctrl+C`.
-   - Or run the dedicated shutdown script from any terminal:
-     ```bash
-     ./scripts/stop.sh
-     ```
+Once this installer is published to the repository's `main` branch, run the following on a Mac with Homebrew and Git. Choose a destination whose parent already exists, with roughly 9 GB for the models plus space for dependencies and staging.
 
----
+```bash
+curl -fsSL https://raw.githubusercontent.com/NinjaRoboticsEducation/EchoLearning/main/scripts/install.sh | bash
+```
+
+The installer clones the current default branch into a staging directory and refuses to install over an existing destination. Start the installed checkout with `./scripts/start.sh`. The first launch recreates the Python environment at the published path. Moving the checkout also triggers runtime repair when necessary.
+
+In Settings, export a JSON backup or select a file to preview and merge. Existing records win on matching IDs, and vocabulary matches by word and learning language. Backups include vocabulary, cached materials and report metadata. Audio remains outside the backup. Export before moving study data to a new browser or hostname.
+
+## Local MCP
+
+Configure your MCP client's stdio command as the absolute path to `scripts/start_mcp.sh` in the installed checkout. The server exposes learning capabilities, retokenization, and contextual dictionary lookup. Start EchoLearning before using dictionary lookup. This entry point runs as a local subprocess.
+
 
 ## 🌟 Core Features & Study Workflows
 

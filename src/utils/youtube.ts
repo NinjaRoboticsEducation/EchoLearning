@@ -6,11 +6,12 @@ export function extractYouTubeId(input: string): string | null {
   }
   try {
     const url = new URL(trimmed);
-    if (url.hostname.includes('youtu.be')) {
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port) return null;
+    if (url.hostname === 'youtu.be') {
       const id = url.pathname.split('/').filter(Boolean)[0];
       return id && /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
     }
-    if (url.hostname.includes('youtube.com')) {
+    if (['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'].includes(url.hostname)) {
       const v = url.searchParams.get('v');
       if (v && /^[a-zA-Z0-9_-]{11}$/.test(v)) return v;
       const parts = url.pathname.split('/').filter(Boolean);
@@ -23,8 +24,7 @@ export function extractYouTubeId(input: string): string | null {
       }
     }
   } catch {
-    // Fallback regex
+    return null;
   }
-  const match = trimmed.match(/(?:v=|youtu\.be\/|embed\/|shorts\/|live\/)([a-zA-Z0-9_-]{11})/);
-  return match ? match[1] : null;
+  return null;
 }

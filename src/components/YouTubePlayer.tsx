@@ -103,6 +103,7 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
   const loadedVideoIdRef = useRef<string | null>(null);
   const lastReportedTimeRef = useRef<number>(-1);
 
+  const [rates, setRates] = useState<number[]>([1]);
   const [isReady, setIsReady] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
@@ -160,7 +161,8 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
           onReady: (event: any) => {
             if (!isMounted) return;
             setIsReady(true);
-            event.target.setPlaybackRate(playbackRate);
+            setRates(event.target.getAvailablePlaybackRates?.() ?? [1]);
+            onPlaybackRateChange(event.target.getPlaybackRate?.() ?? 1);
             playerRefOut.current = {
               seekTo: (seconds: number, allowSeekAhead = true) => {
                 if (ytPlayerRef.current?.seekTo) {
@@ -186,10 +188,17 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
               },
             };
           },
+          onPlaybackRateChange: (event: any) => {
+            if (isMounted) onPlaybackRateChange(event.data);
+          },
           onStateChange: (event: any) => {
             if (!isMounted) return;
             const YTState = window.YT?.PlayerState;
             if (!YTState) return;
+            if (event.data === YTState.CUED || event.data === YTState.PLAYING) {
+              setRates(event.target.getAvailablePlaybackRates?.() ?? [1]);
+              onPlaybackRateChange(event.target.getPlaybackRate?.() ?? 1);
+            }
             if (event.data === YTState.PLAYING) {
               onPlayStateChangeRef.current(true);
             } else if (
@@ -299,11 +308,9 @@ export const YouTubePlayer: React.FC<YouTubePlayerProps> = ({
   };
 
   const handleRateChange = (rate: number) => {
-    onPlaybackRateChange(rate);
     ytPlayerRef.current?.setPlaybackRate?.(rate);
   };
 
-  const rates = [0.75, 0.9, 1.0, 1.15, 1.25];
 
   return (
     <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">

@@ -11,7 +11,8 @@ echo "==========================================================================
 
 # 1. Verify macOS
 if [[ "$OSTYPE" != "darwin"* ]]; then
-  echo "⚠️ Warning: This setup script is optimized for macOS (Intel or Apple Silicon)."
+  echo "Setup currently supports macOS." >&2
+  exit 1
 fi
 
 ARCH="$(uname -m)"
@@ -56,41 +57,43 @@ if command -v llama-server >/dev/null 2>&1 || [ -x "/usr/local/bin/llama-server"
   echo "✓ llama-server executable located"
 else
   echo "Installing llama.cpp via brew..."
-  brew install llama.cpp || echo "Please install llama.cpp via Homebrew or build from source."
+  brew install llama.cpp
 fi
 
 if command -v whisper-server >/dev/null 2>&1 || [ -x "/usr/local/bin/whisper-server" ] || [ -x "/opt/homebrew/bin/whisper-server" ]; then
   echo "✓ whisper-server executable located"
 else
   echo "whisper-server not found in standard path. Attempting brew install whisper-cpp..."
-  brew install whisper-cpp || echo "Please ensure whisper-server is compiled or in PATH."
+  brew install whisper-cpp
 fi
 
 # 5. Setup Python Virtual Environment
 VENV_DIR="$PROJECT_ROOT/adk_backend/.venv"
 echo ""
 echo "Configuring Python virtual environment at $VENV_DIR..."
-if [ ! -d "$VENV_DIR" ]; then
+if [[ ! -x "$VENV_DIR/bin/python" || "$(cat "$VENV_DIR/.echo-location" 2>/dev/null || true)" != "$PROJECT_ROOT" ]]; then
+  rm -rf "$VENV_DIR"
   python3 -m venv "$VENV_DIR"
   echo "✓ Virtual environment created."
 fi
 
 echo "Updating pip and installing certifi Root CA certificates..."
-"$VENV_DIR/bin/pip" install --upgrade pip setuptools wheel certifi
+"$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel certifi
 
 # Fix macOS Python SSL certificate verify issue
 CERT_PATH="$("$VENV_DIR/bin/python" -m certifi)"
 echo "✓ CA Certificates verified at: $CERT_PATH"
 
 echo "Installing backend requirements..."
-"$VENV_DIR/bin/pip" install -r "$PROJECT_ROOT/adk_backend/requirements.txt"
+"$VENV_DIR/bin/python" -m pip install -r "$PROJECT_ROOT/adk_backend/requirements.txt"
 echo "✓ Python backend dependencies installed."
 
 # 6. Setup Frontend Dependencies
 echo ""
 echo "Installing Node.js frontend dependencies..."
 cd "$PROJECT_ROOT"
-npm install --legacy-peer-deps
+npm ci
+npm run build
 echo "✓ Frontend packages installed."
 
 # 7. Model Verification & Downloads
@@ -99,24 +102,10 @@ echo "Verifying local AI models..."
 mkdir -p "$PROJECT_ROOT/models"
 chmod +x "$PROJECT_ROOT/scripts/"*.sh
 
-WHISPER_MODEL="$PROJECT_ROOT/models/ggml-large-v3-turbo.bin"
-LLM_MODEL="$PROJECT_ROOT/models/Qwen3.5-9B-Q6_K.gguf"
-
-if [ -f "$WHISPER_MODEL" ]; then
-  echo "✓ Whisper STT model found: $WHISPER_MODEL"
-else
-  echo "Downloading Whisper Large-v3-Turbo (~1.6 GB)..."
-  curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin" -o "$WHISPER_MODEL"
-  echo "✓ Whisper STT model downloaded."
+if [[ "${ECHO_SETUP_RUNTIME_ONLY:-0}" != 1 ]]; then
+  "$SCRIPT_DIR/download_models.sh"
 fi
-
-if [ -f "$LLM_MODEL" ]; then
-  echo "✓ Qwen3.5-9B LLM model found: $LLM_MODEL"
-else
-  echo ""
-  echo "Notice: $LLM_MODEL not detected."
-  echo "Please run './scripts/download_models.sh' to download the Qwen3.5 GGUF model (~7.5 GB)."
-fi
+printf '%s\n' "$PROJECT_ROOT" > "$VENV_DIR/.echo-location"
 
 # 8. Setup runtime directories
 mkdir -p "$PROJECT_ROOT/.pids" "$PROJECT_ROOT/logs"
