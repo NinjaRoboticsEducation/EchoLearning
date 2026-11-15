@@ -66,12 +66,6 @@ import {
 
 type ActiveTab = 'home' | 'studio' | 'vocabulary' | 'history' | 'settings';
 type SnippetClient = 'claude' | 'codex' | 'antigravity' | 'bots';
-type UninstallCommandKey =
-  | 'interactive'
-  | 'keepData'
-  | 'fullReset'
-  | 'completeWithBrew'
-  | 'dryRun';
 
 const navigation = {
   studio: ['Practice Studio', '練習スタジオ', '練習室', '练习室'],
@@ -221,9 +215,6 @@ export default function App() {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [activeSnippetTab, setActiveSnippetTab] = useState<SnippetClient>('claude');
   const [copiedSnippet, setCopiedSnippet] = useState(false);
-  const [activeUninstallCmd, setActiveUninstallCmd] =
-    useState<UninstallCommandKey>('interactive');
-  const [copiedUninstallCmd, setCopiedUninstallCmd] = useState(false);
 
   // Current Studio Material & Import State
   const [currentVideo, setCurrentVideo] = useState<VideoMaterial | null>(null);
@@ -971,28 +962,6 @@ export default function App() {
     }
   };
 
-  const uninstallCommands: Record<UninstallCommandKey, string> = {
-    interactive: systemStatus?.uninstall?.commands?.interactive || './uninstall.sh',
-    keepData:
-      systemStatus?.uninstall?.commands?.keepData || './uninstall.sh --all --keep-data',
-    fullReset: systemStatus?.uninstall?.commands?.fullReset || './uninstall.sh --all',
-    completeWithBrew:
-      systemStatus?.uninstall?.commands?.completeWithBrew ||
-      './uninstall.sh --all --brew --remove-app-dir',
-    dryRun:
-      systemStatus?.uninstall?.commands?.dryRun || './uninstall.sh --dry-run --all',
-  };
-
-  const handleCopyUninstallCmd = async () => {
-    try {
-      await navigator.clipboard.writeText(uninstallCommands[activeUninstallCmd]);
-      setCopiedUninstallCmd(true);
-      setTimeout(() => setCopiedUninstallCmd(false), 1800);
-    } catch {
-      // Ignore clipboard failure
-    }
-  };
-
   const activeSegment = currentVideo
     ? currentVideo.segments[activeSegmentIndex] || currentVideo.segments[0]
     : null;
@@ -1265,7 +1234,7 @@ export default function App() {
             {customVideos.length > 0 && (
               <section className="max-w-3xl mx-auto space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                  <h2 className="text-sm font-bold text-slate-300 flex items-center gap-2">
+                  <h2 className="text-sm font-bold text-white text-[#ffffff]! flex items-center gap-2">
                     <FolderOpen className="w-4 h-4 text-sky-400" />
                     <span>{uiCopy.savedTitle[localeIndex]}</span>
                   </h2>
@@ -1298,7 +1267,7 @@ export default function App() {
                           <span aria-hidden="true">·</span>
                           <span>{video.segments?.length || 0} lines</span>
                         </div>
-                        <div className="text-sm font-bold text-slate-100 line-clamp-2 break-words">
+                        <div className="text-sm font-bold text-white text-[#ffffff]! line-clamp-2 break-words">
                           {video.title}
                         </div>
                         <div className="text-xs text-slate-400 truncate">
@@ -1861,117 +1830,6 @@ export default function App() {
                 </div>
               </section>
             </div>
-
-            {/* Uninstall & Disk Cleanup Panel */}
-            <section className="echo-panel space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="mb-0! flex items-center gap-2 text-[#eef1fa] text-[18px] font-bold">
-                  <Trash2 className="w-5 h-5 text-[#c3bbff]" />
-                  <span>Uninstall &amp; Disk Cleanup</span>
-                </h2>
-                <span className="text-xs font-mono-tabular text-[#b8c1d4]">
-                  {systemStatus?.uninstall?.scriptPath || './uninstall.sh'}
-                </span>
-              </div>
-
-              <p className="text-xs sm:text-sm text-[#b8c1d4]">
-                Reclaim gigabytes of disk space by removing local AI models, Python/Node
-                environments, or the full installation from Terminal. Click{' '}
-                <strong className="text-[#eef1fa]">Generate backup</strong> above first if you want
-                a JSON copy of your saved vocabulary and shadowing history.
-              </p>
-
-              {/* Detected Installed Components */}
-              <div className="flex flex-wrap gap-2 text-xs">
-                {(
-                  [
-                    [
-                      'Local AI Models',
-                      Boolean(systemStatus?.uninstall?.components?.modelsPresent),
-                    ],
-                    [
-                      'Python .venv',
-                      Boolean(systemStatus?.uninstall?.components?.venvPresent),
-                    ],
-                    [
-                      'Node Modules',
-                      Boolean(systemStatus?.uninstall?.components?.nodeModulesPresent),
-                    ],
-                    [
-                      'SQLite Study Vault',
-                      Boolean(systemStatus?.uninstall?.components?.dataPresent),
-                    ],
-                  ] as const
-                ).map(([label, present]) => (
-                  <span
-                    key={label}
-                    className={`px-2.5 py-1 rounded-md bg-[#151925] border flex items-center gap-1.5 ${
-                      present
-                        ? 'border-[#c3bbff]/70 text-[#eef1fa]'
-                        : 'border-[#525a6d] text-[#b8c1d4]'
-                    }`}
-                  >
-                    <span
-                      className={`w-2 h-2 rounded-full ${
-                        present ? 'bg-[#c3bbff]' : 'bg-[#525a6d]'
-                      }`}
-                    />
-                    <span>
-                      {label}: {present ? 'Detected' : 'Not present'}
-                    </span>
-                  </span>
-                ))}
-              </div>
-
-              {/* Selectable One-Click Copyable Terminal Commands */}
-              <div className="space-y-2">
-                <div className="flex flex-wrap gap-1.5 text-xs">
-                  {(
-                    [
-                      ['interactive', 'Interactive Wizard'],
-                      ['keepData', 'Keep Study Data'],
-                      ['fullReset', 'Full Reset'],
-                      ['completeWithBrew', 'Complete Uninstall + Brew'],
-                      ['dryRun', 'Dry-Run Preview'],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => {
-                        setActiveUninstallCmd(key);
-                        setCopiedUninstallCmd(false);
-                      }}
-                      className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
-                        activeUninstallCmd === key
-                          ? 'bg-[#c3bbff] text-[#151925]'
-                          : 'bg-[#151925] text-[#eef1fa] border border-[#525a6d] hover:border-[#c3bbff]'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="relative">
-                  <pre className="p-3 pr-10 rounded-lg bg-[#151925] border border-[#525a6d] text-[11px] font-mono-tabular text-[#eef1fa] overflow-x-auto whitespace-pre-wrap break-all">
-                    {uninstallCommands[activeUninstallCmd]}
-                  </pre>
-                  <button
-                    type="button"
-                    onClick={handleCopyUninstallCmd}
-                    aria-label="Copy uninstall command"
-                    className="absolute top-2 right-2 p-1.5 rounded-md bg-[#1e2331] border border-[#525a6d] hover:border-[#c3bbff] text-[#eef1fa] cursor-pointer"
-                  >
-                    {copiedUninstallCmd ? (
-                      <Check className="w-3.5 h-3.5 text-[#6ee7b7]" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                </div>
-              </div>
-            </section>
           </section>
         )}
       </main>

@@ -45,6 +45,57 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+LOCAL_HOST_HEADERS = {"127.0.0.1", "::1", "[::1]", "localhost", "testserver", ""}
+
+
+def _extract_host_name(raw_host: str) -> str:
+    host = (raw_host or "").strip().lower()
+    if not host:
+        return ""
+    if host.startswith("["):
+        bracket_end = host.find("]")
+        return host[: bracket_end + 1] if bracket_end != -1 else host
+    if host.count(":") == 1:
+        return host.split(":", 1)[0]
+    return host
+
+
+@app.middleware("http")
+async def enforce_tailscale_access_guard(request: Request, call_next):
+    """Blocks non-loopback / Tailscale requests when Tailscale remote access is disabled."""
+    client_host = (request.client.host if request.client else "127.0.0.1").strip().lower()
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    forwarded_ip = forwarded_for.split(",")[0].strip().lower() if forwarded_for else ""
+    host_name = _extract_host_name(request.headers.get("host", ""))
+
+    is_remote = (
+        client_host not in LOCAL_CLIENT_HOSTS
+        or bool(forwarded_ip and forwarded_ip not in LOCAL_CLIENT_HOSTS)
+        or bool(host_name and host_name not in LOCAL_HOST_HEADERS)
+    )
+    if is_remote:
+        settings = db.get_settings()
+        if not settings.get("tailscale_enabled", True):
+            if request.url.path.startswith("/mcp"):
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": -32001,
+                            "message": "Tailscale remote access is disabled in Settings.",
+                        },
+                        "id": None,
+                    },
+                )
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Tailscale remote access is disabled in Settings."},
+            )
+
+    return await call_next(request)
+
 
 @app.get("/api/health")
 async def enhanced_health_check():

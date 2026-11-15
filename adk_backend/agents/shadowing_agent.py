@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Any
@@ -28,6 +29,9 @@ class CoachingFeedbackOutput(BaseModel):
     recommendedRetryText: str | None = None
 
 
+ShadowingCoachingNotes = CoachingFeedbackOutput
+
+
 SHADOWING_AGENT_INSTRUCTION = """You are an expert English and Japanese speech, phonetics, and shadowing coach.
 You will receive deterministic acoustic measurements, speech rate, F0 pitch variation, and word-level alignment
 that have ALREADY been computed from the learner's recording.
@@ -54,6 +58,28 @@ def create_shadowing_agent() -> LlmAgent:
         model=get_local_model(temperature=0.2),
         instruction=SHADOWING_AGENT_INSTRUCTION,
         tools=[transcribe_and_analyze_audio],
+    )
+
+
+COACHING_AGENT_INSTRUCTION = """/no_think
+You are an expert English and Japanese shadowing coach.
+You receive pre-computed deterministic scores, acoustic measurements, and up to 8 mismatched words.
+Do NOT call any tools. Do NOT output <think> blocks, explanations, or markdown fences.
+Respond ONLY with a single raw JSON object containing:
+- "scoreExplanation": 1-2 short sentences explaining the measured performance.
+- "pronunciationFeedback": 1-3 items {"targetWord", "readingOrIpa", "category", "observedIssue", "actionableTip", "severity": "high"|"medium"|"low"}.
+- "intonationTips": 1-2 short tips referencing measured F0 variation or pauses.
+- "improvementSuggestions": 2-3 short actionable practice steps.
+"""
+
+
+def create_coaching_agent() -> LlmAgent:
+    """Creates a lightweight, tool-free ADK 2.x LlmAgent for fast qualitative coaching."""
+    return LlmAgent(
+        name="shadowing_coaching_agent",
+        model=get_local_model(temperature=0.2),
+        instruction=COACHING_AGENT_INSTRUCTION,
+        tools=[],
     )
 
 
@@ -188,12 +214,15 @@ async def generate_coaching_and_merge(
     if det_report.get("hardGateTriggered"):
         return det_report
 
-    # Safe JSON-escaped inputs in prompt (C10)
+    # Safe JSON-escaped inputs in prompt (C10); keep payload compact for fast CPU inference
+    mismatched_words = [
+        w for w in (det_report.get("wordDiff") or []) if w.get("status") != "correct"
+    ][:8]
     prompt_payload = {
         "language": language,
         "mode": mode,
-        "targetText": det_report.get("targetText", ""),
-        "recognizedText": det_report.get("recognizedText", ""),
+        "targetText": str(det_report.get("targetText") or "")[:240],
+        "recognizedText": str(det_report.get("recognizedText") or "")[:240],
         "deterministicScores": {
             "overallScore": det_report["overallScore"],
             "accuracyScore": det_report["accuracyScore"],
@@ -210,7 +239,7 @@ async def generate_coaching_and_merge(
             "speechRateValue": det_report.get("speechRateValue"),
             "targetRateValue": det_report.get("targetRateValue"),
         },
-        "wordDiff": det_report.get("wordDiff", [])[:40],
+        "mismatchedWords": mismatched_words,
     }
 
     prompt = (
@@ -219,12 +248,15 @@ async def generate_coaching_and_merge(
     )
 
     try:
-        agent = create_shadowing_agent()
-        coaching = await execute_adk_agent_json(
-            agent=agent,
-            prompt=prompt,
-            initial_state={},
-            schema_model=CoachingFeedbackOutput,
+        agent = create_coaching_agent()
+        coaching = await asyncio.wait_for(
+            execute_adk_agent_json(
+                agent=agent,
+                prompt=prompt,
+                initial_state={},
+                schema_model=ShadowingCoachingNotes,
+            ),
+            timeout=6.0,
         )
         # Preserve all deterministic numeric scores, diffs, and telemetry; merge only qualitative text
         merged = dict(det_report)

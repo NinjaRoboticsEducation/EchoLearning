@@ -89,7 +89,7 @@ def _extract_pitch_contour(samples: array | list[int], sample_rate: int) -> dict
         sig = [s / 32768.0 for s in samples]
 
     frame_len = max(32, int(eff_sr * 0.030))  # 30ms frame
-    hop_len = max(16, int(eff_sr * 0.020))    # 20ms hop
+    hop_len = max(16, int(eff_sr * 0.020), max(1, (len(sig) - frame_len) // 200))  # cap ~200 frames
     min_lag = max(2, int(eff_sr / 450.0))     # max 450 Hz
     max_lag = min(frame_len - 2, int(eff_sr / 75.0))  # min 75 Hz
 

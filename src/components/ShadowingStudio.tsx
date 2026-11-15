@@ -778,6 +778,10 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         String(previewResult?.durationSec ?? Math.max(1, recordingSecRef.current))
       );
       form.append('target_duration_sec', String(takeSnapshot.targetDurationSec));
+      form.append('start_sec', String(takeSnapshot.startSec));
+      form.append('end_sec', String(takeSnapshot.endSec));
+      form.append('audio_start_sec', String(takeSnapshot.startSec));
+      form.append('audio_end_sec', String(takeSnapshot.endSec));
       if (previewResult?.recognizedText) {
         form.append('recognized_text', previewResult.recognizedText);
       }

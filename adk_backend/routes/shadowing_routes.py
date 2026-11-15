@@ -209,6 +209,8 @@ async def analyze_shadowing_take(
     target_duration_sec: float | None = Form(None),
     audio_start_sec: float | None = Form(None),
     audio_end_sec: float | None = Form(None),
+    start_sec: float | None = Form(None),
+    end_sec: float | None = Form(None),
     audio: UploadFile | None = File(None),
 ):
     """Phase R3/R5: Deterministic acoustic + alignment shadowing analysis with ADK coaching."""
@@ -242,12 +244,14 @@ async def analyze_shadowing_take(
                 whisper_info = await transcribe_audio_with_whisper(eval_wav, language=clean_lang)
                 spoken = (whisper_info.get("text") or "").strip()
 
+            eff_start_sec = audio_start_sec if audio_start_sec is not None else start_sec
+            eff_end_sec = audio_end_sec if audio_end_sec is not None else end_sec
             ref_cmp = (
                 compare_with_reference_wav(
                     learner_acoustics=acoustics,
                     video_id=video_id,
-                    start_sec=audio_start_sec,
-                    end_sec=audio_end_sec,
+                    start_sec=eff_start_sec,
+                    end_sec=eff_end_sec,
                 )
                 if acoustics.get("isValidWav") and not acoustics.get("isSilent")
                 else {"hasReference": False, "referencePitchContour": []}

@@ -58,6 +58,9 @@ function loadStudy(): StudyData {
 
 function persistStudy(data: StudyData): void {
   try {
+    localStorage.removeItem(VOCAB_STORAGE_KEY);
+    localStorage.removeItem(HISTORY_STORAGE_KEY);
+    localStorage.removeItem(CUSTOM_VIDEOS_KEY);
     localStorage.setItem(STUDY_KEY, JSON.stringify(data));
   } catch {
     // Ignore QuotaExceededError on cache writes; SQLite is primary storage (D01)
@@ -86,6 +89,18 @@ export function loadCustomVideos(): SavedMaterial[] {
 
 function vocabularyKey(item: SavedVocabularyItem): string {
   return JSON.stringify([item.language, item.word.normalize('NFC').toLowerCase()]);
+}
+
+export function saveVocabularyList(items: SavedVocabularyItem[]): SavedVocabularyItem[] {
+  return updateStudy('vocabulary', () => items);
+}
+
+export function savePracticeHistory(items: ShadowingAssessmentReport[]): ShadowingAssessmentReport[] {
+  return updateStudy('history', () => items);
+}
+
+export function saveCustomVideos(items: SavedMaterial[]): SavedMaterial[] {
+  return updateStudy('materials', () => items);
 }
 
 export function saveVocabularyItem(item: SavedVocabularyItem): SavedVocabularyItem[] {
@@ -221,19 +236,22 @@ export async function migrateLocalStorageToSqlite(): Promise<boolean> {
 export async function fetchMaterialsFromApi(): Promise<SavedMaterial[]> {
   try {
     const res = await fetch('/api/materials');
-    if (!res.ok) throw new Error('Failed to load materials');
-    const data = await res.json();
-    const items: SavedMaterial[] = Array.isArray(data)
-      ? data
-      : Array.isArray(data?.materials)
-      ? data.materials
-      : [];
-    const current = loadStudy();
-    persistStudy({ ...current, materials: items });
-    return items;
+    if (res.ok) {
+      const data = await res.json();
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.materials)
+        ? data.materials
+        : null;
+      if (Array.isArray(list)) {
+        saveCustomVideos(list);
+        return list;
+      }
+    }
   } catch {
-    return loadCustomVideos();
+    // Fall back to local cache when backend is unreachable
   }
+  return loadCustomVideos();
 }
 
 export async function fetchMaterialByIdApi(videoId: string): Promise<SavedMaterial | null> {
@@ -255,11 +273,14 @@ export async function fetchMaterialByIdApi(videoId: string): Promise<SavedMateri
 export async function saveMaterialToApi(video: VideoMaterial): Promise<SavedMaterial[]> {
   const updated = saveCustomVideo(video);
   try {
-    await fetch('/api/materials', {
+    const res = await fetch('/api/materials', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(video),
     });
+    if (res.ok) {
+      return await fetchMaterialsFromApi();
+    }
   } catch {
     // Keep local cache fallback
   }
@@ -287,11 +308,14 @@ export async function updateMaterialSegmentApi(
 }
 
 export async function deleteMaterialFromApi(videoId: string): Promise<SavedMaterial[]> {
-  const updated = removeCustomVideo(videoId);
+  const updated = saveCustomVideos(loadCustomVideos().filter((item) => item.videoId !== videoId));
   try {
-    await fetch(`/api/materials/${encodeURIComponent(videoId)}`, {
+    const res = await fetch(`/api/materials/${encodeURIComponent(videoId)}`, {
       method: 'DELETE',
     });
+    if (res.ok || res.status === 404) {
+      return await fetchMaterialsFromApi();
+    }
   } catch {
     // Keep local cache update
   }
@@ -301,31 +325,37 @@ export async function deleteMaterialFromApi(videoId: string): Promise<SavedMater
 export async function fetchVocabularyFromApi(): Promise<SavedVocabularyItem[]> {
   try {
     const res = await fetch('/api/vocabulary');
-    if (!res.ok) throw new Error('Failed to load vocabulary');
-    const data = await res.json();
-    const items: SavedVocabularyItem[] = Array.isArray(data)
-      ? data
-      : Array.isArray(data?.items)
-      ? data.items
-      : Array.isArray(data?.vocabulary)
-      ? data.vocabulary
-      : [];
-    const current = loadStudy();
-    persistStudy({ ...current, vocabulary: items });
-    return items;
+    if (res.ok) {
+      const data = await res.json();
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data?.vocabulary)
+        ? data.vocabulary
+        : null;
+      if (Array.isArray(list)) {
+        saveVocabularyList(list);
+        return list;
+      }
+    }
   } catch {
-    return loadSavedVocabulary();
+    // Fall back to local cache when backend is unreachable
   }
+  return loadSavedVocabulary();
 }
 
 export async function saveVocabularyItemApi(item: SavedVocabularyItem): Promise<SavedVocabularyItem[]> {
   const updated = saveVocabularyItem(item);
   try {
-    await fetch('/api/vocabulary', {
+    const res = await fetch('/api/vocabulary', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(item),
     });
+    if (res.ok) {
+      return await fetchVocabularyFromApi();
+    }
   } catch {
     // Keep local cache fallback
   }
@@ -333,11 +363,14 @@ export async function saveVocabularyItemApi(item: SavedVocabularyItem): Promise<
 }
 
 export async function removeVocabularyItemApi(id: string): Promise<SavedVocabularyItem[]> {
-  const updated = removeVocabularyItem(id);
+  const updated = saveVocabularyList(loadSavedVocabulary().filter((item) => item.id !== id));
   try {
-    await fetch(`/api/vocabulary/${encodeURIComponent(id)}`, {
+    const res = await fetch(`/api/vocabulary/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
+    if (res.ok || res.status === 404) {
+      return await fetchVocabularyFromApi();
+    }
   } catch {
     // Keep local cache fallback
   }
@@ -347,21 +380,24 @@ export async function removeVocabularyItemApi(id: string): Promise<SavedVocabula
 export async function fetchHistoryFromApi(): Promise<ShadowingAssessmentReport[]> {
   try {
     const res = await fetch('/api/history');
-    if (!res.ok) throw new Error('Failed to load history');
-    const data = await res.json();
-    const items: ShadowingAssessmentReport[] = Array.isArray(data)
-      ? data
-      : Array.isArray(data?.items)
-      ? data.items
-      : Array.isArray(data?.history)
-      ? data.history
-      : [];
-    const current = loadStudy();
-    persistStudy({ ...current, history: items });
-    return items;
+    if (res.ok) {
+      const data = await res.json();
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data?.history)
+        ? data.history
+        : null;
+      if (Array.isArray(list)) {
+        savePracticeHistory(list);
+        return list;
+      }
+    }
   } catch {
-    return loadPracticeHistory();
+    // Fall back to local cache when backend is unreachable
   }
+  return loadPracticeHistory();
 }
 
 export async function savePracticeReportApi(
@@ -370,11 +406,14 @@ export async function savePracticeReportApi(
   const updated = savePracticeReport(report);
   try {
     const { audioDataUrl: _strip, ...metadata } = report;
-    await fetch('/api/history', {
+    const res = await fetch('/api/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(metadata),
     });
+    if (res.ok) {
+      return await fetchHistoryFromApi();
+    }
   } catch {
     // Keep local cache fallback
   }
@@ -382,11 +421,14 @@ export async function savePracticeReportApi(
 }
 
 export async function deletePracticeReportApi(id: string): Promise<ShadowingAssessmentReport[]> {
-  const updated = deletePracticeReport(id);
+  const updated = savePracticeHistory(loadPracticeHistory().filter((item) => item.id !== id));
   try {
-    await fetch(`/api/history/${encodeURIComponent(id)}`, {
+    const res = await fetch(`/api/history/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
+    if (res.ok || res.status === 404) {
+      return await fetchHistoryFromApi();
+    }
   } catch {
     // Keep local cache fallback
   }

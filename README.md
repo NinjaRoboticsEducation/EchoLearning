@@ -29,11 +29,13 @@
    - [Setup Guide for Claude Code, Codex & Antigravity](#setup-guide-for-ai-assistants)
 7. [🤖 Connecting Personal AI Bots (Grok Bot, Muse Bot, Custom Agents)](#-connecting-personal-ai-bots)
 8. [📱 Remote Access via Tailscale (Practice Anywhere on iPhone or iPad)](#-remote-access-via-tailscale)
+   - [3-Minute Tailscale Setup Guide](#3-minute-tailscale-setup-guide)
+   - [Instant Tailscale Security & Access Control](#instant-tailscale-security--access-control)
 9. [🗑️ Uninstalling EchoLearning & Reclaiming Disk Space](#-uninstalling-echolearning--reclaiming-disk-space)
    - [Why an Uninstaller?](#why-an-uninstaller)
    - [Decision Flowchart: Choosing the Right Cleanup Option](#decision-flowchart-choosing-the-right-cleanup-option)
-   - [Comparison Table: Uninstall Modes & CLI Flags](#comparison-table-uninstall-modes--cli-flags)
-   - [Step-by-Step Guide: Web UI Settings & Terminal](#step-by-step-guide-web-ui-settings--terminal)
+   - [Comparison Table of Uninstall Modes & CLI Flags](#comparison-table-of-uninstall-modes--cli-flags)
+   - [Step-by-Step Terminal Uninstaller Guide](#step-by-step-terminal-uninstaller-guide)
    - [Safety Guarantees & Study Vault Protection](#safety-guarantees--study-vault-protection)
 10. [📖 Plain-English Glossary](#-plain-english-glossary)
 11. [🧪 Running Tests & Code Verification](#-running-tests--code-verification)
@@ -655,6 +657,15 @@ You can also view this directly in the EchoLearning **Settings tab**, which dete
 > **Queue Lessons from Your Phone:**  
 > When you stumble upon a great English or Japanese YouTube video on your phone, open Safari, paste the link into your EchoLearning instance, and generate the transcript. The heavy AI processing runs on your Mac, and the lesson is saved to your vault immediately!
 
+### Instant Tailscale Security & Access Control
+
+EchoLearning includes built-in network security controls so you can manage remote access with a single click without touching macOS firewall rules or terminal configurations:
+
+- **One-Click Tailscale Toggle:** In the web studio under **Settings → Private connections & MCP**, you can toggle **Tailscale access** between `ON` and `OFF` at any time.
+- **Immediate Remote Lockdown (HTTP 403):** When switched to **`OFF`**, EchoLearning's security middleware immediately blocks all incoming Tailscale and non-loopback network requests to both the REST API (`/api/*`) and the FastMCP server (`/mcp`) with `HTTP 403 Forbidden` (`{"detail": "Tailscale remote access is disabled in Settings."}` or JSON-RPC `-32001`).
+- **Local Mac Access Remains Active:** Local connections on your host Mac (`127.0.0.1` and `localhost:3000` / `localhost:5173`) remain 100% active, uninterrupted, and fully functional. You can continue practicing locally on your Mac while external devices are securely shut out.
+- **Instant Re-enable:** When you are ready to practice on your iPhone or iPad again, simply flip the toggle back to **`ON`** in Settings. Remote access is restored immediately without needing to restart background services.
+
 ---
 
 ## 🗑️ Uninstalling EchoLearning & Reclaiming Disk Space
@@ -681,14 +692,14 @@ flowchart TD
     Q1 -- "Free up disk space" --> Q2{"Keep your study vocabulary, transcripts, and scores?"}
     Q1 -- "Complete removal / Fresh reset" --> Q3{"Back up your study data before wiping?"}
 
-    Q2 -- "Yes: Keep study data safe" --> OPT1["Option 1: Free up 5–22 GB (Keep Study Data) — ./uninstall.sh --all --keep-data"]
-    Q2 -- "No: Reset everything" --> OPT2["Option 2: Full Application Reset — ./uninstall.sh --all"]
+    Q2 -- "Yes: Keep study data safe" --> OPT1["Option 1: Free up 5–22 GB (Keep Study Data)<br/><code>./uninstall.sh --all --keep-data</code>"]
+    Q2 -- "No: Reset everything" --> OPT2["Option 2: Full Application Reset<br/><code>./uninstall.sh --all</code>"]
 
-    Q3 -- "Yes: Back up to Desktop first" --> OPT3["Option 3: Complete Removal + Desktop Backup — ./uninstall.sh --all --backup-dir ~/Desktop --brew --remove-app-dir"]
-    Q3 -- "No: Total clean wipe" --> OPT4["Option 4: Complete App & Engine Removal — ./uninstall.sh --all --brew --remove-app-dir"]
+    Q3 -- "Yes: Back up first" --> OPT3["Option 3: Complete Removal + Study Backup<br/>1. Backup: Settings → Study backup (or --backup-dir)<br/>2. Terminal: <code>./uninstall.sh --all --backup-dir ~/Desktop --brew --remove-app-dir</code>"]
+    Q3 -- "No: Total clean wipe" --> OPT4["Option 4: Complete App & Engine Removal<br/>Run in Terminal: <code>./uninstall.sh --all --brew --remove-app-dir</code>"]
 
-    START -. "Preview first without changes" .-> PREVIEW["Dry-Run Preview (No deletions) — ./uninstall.sh --dry-run --all"]
-    START -. "Guided 5-question menu" .-> WIZARD["Interactive Menu Wizard — ./uninstall.sh"]
+    START -. "Preview first without changes" .-> PREVIEW["Dry-Run Preview (No deletions)<br/>Run in Terminal: <code>./uninstall.sh --dry-run --all</code>"]
+    START -. "Guided 5-question menu" .-> WIZARD["Interactive Menu Wizard<br/>Run in Terminal: <code>./uninstall.sh</code>"]
 
     classDef primary fill:#2563eb,stroke:#1d4ed8,color:#ffffff,stroke-width:2px;
     classDef safe fill:#059669,stroke:#047857,color:#ffffff,stroke-width:2px;
@@ -726,35 +737,17 @@ The uninstaller provides both an interactive terminal wizard and direct non-inte
 
 ---
 
-### Step-by-Step Guide: Web UI Settings & Terminal
+### Step-by-Step Terminal Uninstaller Guide
 
-You can initiate the uninstaller either directly from the **Web Studio UI** or from your **macOS Terminal**.
+To prevent accidental deletions and ensure complete transparency, uninstallation and deep disk cleanup are performed directly in your macOS Terminal via the `./uninstall.sh` script.
 
-#### Method 1: Copy-Paste Straight from Web UI Settings
+> [!TIP]
+> **Back Up Your Study Vault Before Cleanup:**  
+> Before running the uninstaller, you can preserve your vocabulary cards, transcript corrections, and shadowing performance history in two convenient ways:
+> - **In Web UI Settings:** Go to **Settings → Study backup** and click **Generate Backup** to download your complete study vault as a JSON archive.
+> - **In Terminal via CLI:** Pass `--backup-dir <directory>` (e.g. `./uninstall.sh --all --backup-dir ~/Desktop`) to automatically generate a compressed `.tar.gz` archive before any files are removed.
 
-1. Open EchoLearning in your browser (e.g. [http://localhost:5173](http://localhost:5173) or [http://127.0.0.1:3000](http://127.0.0.1:3000)).
-2. Click on the **⚙️ Settings** tab in the top navigation bar.
-3. Scroll down to the **Uninstall & Disk Cleanup** card.
-4. Inspect the live status badges showing which components are currently detected on your Mac:
-   - **Local AI Models** (`Present` / `Clean`)
-   - **Python .venv** (`Present` / `Clean`)
-   - **Node Modules** (`Present` / `Clean`)
-   - **SQLite Study Vault** (`Present` / `Clean`)
-5. *(Optional but Recommended)* Under **Study Data Management**, click **Generate Backup** to download your complete study history, vocabulary, and transcripts as a JSON archive.
-6. Under **Quick CLI Commands**, click your desired mode:
-   - **Interactive Wizard:** `./uninstall.sh`
-   - **Keep Study Data:** `./uninstall.sh --all --keep-data`
-   - **Full Reset:** `./uninstall.sh --all`
-   - **Complete Uninstall + Brew:** `./uninstall.sh --all --brew --remove-app-dir`
-   - **Dry-Run Preview:** `./uninstall.sh --dry-run --all`
-7. Click the **Copy button** (📋) on the right side of the command box.
-8. Open your macOS Terminal, paste the command, and press **Enter**.
-
----
-
-#### Method 2: Step-by-Step Terminal Execution
-
-##### Step 1: Preview Disk Space with a Dry Run
+#### Step 1: Preview Disk Space with a Dry Run (`--dry-run`)
 Before deleting anything, inspect exactly how much space each component occupies without stopping any running services or touching any files:
 
 ```bash
@@ -784,26 +777,47 @@ Example output:
   • Remove EchoLearning directory: false
 ```
 
-##### Step 2: Back Up Your Study Vault (Optional)
-If you want to wipe your local environment but archive your vocabulary cards, sentence edits, and audio recordings to your Desktop:
-
-```bash
-./uninstall.sh --all --backup-dir ~/Desktop
-```
-*This automatically generates `~/Desktop/echolearning-study-backup-YYYYMMDD-HHMMSS.tar.gz` before any data is deleted.*
-
-##### Step 3: Run the Guided Interactive Wizard
-If you prefer answering step-by-step prompts:
+#### Step 2: Run the Guided Interactive Wizard (`./uninstall.sh`)
+If you prefer answering step-by-step prompts without remembering CLI flags, launch the interactive menu:
 
 ```bash
 ./uninstall.sh
 ```
-*You will be presented with a simple 5-option menu:*
-- `[1] Clean Dependencies & AI Models (Keep Study Data in data/)`
-- `[2] Full Application Reset (Remove Dependencies, AI Models & Study Data)`
-- `[3] Complete Uninstall (Remove Everything + Homebrew llama.cpp/whisper-cpp + Optional App Folder)`
-- `[4] Custom Selection (Choose each component interactively)`
-- `[5] Cancel`
+
+You will be presented with a clear 5-option interactive menu:
+- `[1] Clean Dependencies & AI Models (Keep Study Data in data/)` — Frees up 5–22+ GB of SSD space while preserving your SQLite database and recordings.
+- `[2] Full Application Reset (Remove Dependencies, AI Models & Study Data)` — Returns the repository to a clean clone state.
+- `[3] Complete Uninstall (Remove Everything + Homebrew llama.cpp/whisper-cpp + Optional App Folder)` — Complete removal of all models, data, Homebrew inference formulas, and optionally the app folder.
+- `[4] Custom Selection (Choose each component interactively)` — Granular checkboxes for each component.
+- `[5] Cancel` — Aborts cleanly with zero changes.
+
+#### Step 3: Common Non-Interactive One-Line Recipes
+
+For automation, CI, or quick execution, run any of these direct one-line commands:
+
+- **Free Up Maximum Disk Space While Keeping Study Data Safe (Recommended):**
+  ```bash
+  ./uninstall.sh --all --keep-data
+  ```
+  *Removes heavy AI models, Python `.venv`, `node_modules`, and build caches, while preserving `data/echolearning.sqlite3` and `data/audio/`.*
+
+- **Full Application Reset with an Automated Desktop Backup:**
+  ```bash
+  ./uninstall.sh --all --backup-dir ~/Desktop
+  ```
+  *Safely archives your study database and recordings into `~/Desktop/echolearning-study-backup-YYYYMMDD-HHMMSS.tar.gz` before deleting local project data.*
+
+- **Clean Build Dependencies & Python Environment Only (Keep Models & Data):**
+  ```bash
+  ./uninstall.sh --deps-only
+  ```
+  *Cleans `.venv`, `node_modules`, and build caches (~2.5–4.5 GB) without touching downloaded GGUF models or study history.*
+
+- **Complete App & Engine Removal (Wipe Everything):**
+  ```bash
+  ./uninstall.sh --all --brew --remove-app-dir
+  ```
+  *Shuts down services, removes dependencies, AI models, study vault, Homebrew `llama.cpp` and `whisper-cpp`, and deletes the application folder.*
 
 > [!TIP]
 > **Terminal Directory Tip After `--remove-app-dir`:**  

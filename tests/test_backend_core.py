@@ -955,3 +955,195 @@ exec "{real_python}" "$@"
     assert (install_dest / "adk_backend" / ".venv" / "bin" / "python").is_file()
     assert (install_dest / ".installed-commit").is_file()
     assert "./scripts/start_all.sh" in install_proc.stdout
+
+
+def test_tailscale_access_guard_blocks_remote_when_disabled(client: TestClient):
+    """When tailscale_enabled is False, remote Tailscale requests receive 403 while localhost stays 200."""
+    r_disable = client.post("/api/system/settings", json={"tailscale_enabled": False})
+    assert r_disable.status_code == 200
+    assert r_disable.json()["settings"]["tailscale_enabled"] is False
+
+    remote_header_variants = [
+        {"X-Forwarded-For": "100.124.136.6"},
+        {"Host": "100.124.136.6:3000"},
+    ]
+
+    for hdrs in remote_header_variants:
+        r_mat = client.get("/api/materials", headers=hdrs)
+        assert r_mat.status_code == 403
+        assert "Tailscale remote access is disabled" in r_mat.json()["detail"]
+
+        r_tf = client.post(
+            "/api/transcript/fetch",
+            json={"urlOrId": "invalid", "stream": False},
+            headers=hdrs,
+        )
+        assert r_tf.status_code == 403
+        assert "Tailscale remote access is disabled" in r_tf.json()["detail"]
+
+        r_mcp_post = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            headers=hdrs,
+        )
+        assert r_mcp_post.status_code == 403
+        assert r_mcp_post.json()["error"]["code"] == -32001
+
+        r_mcp_get = client.get("/mcp", headers=hdrs)
+        assert r_mcp_get.status_code == 403
+        assert r_mcp_get.json()["error"]["code"] == -32001
+
+    # Local loopback requests continue to succeed with tailscale_enabled=False
+    for local_hdrs in (
+        {},
+        {"Host": "localhost:5173", "X-Forwarded-For": "127.0.0.1"},
+        {"Host": "127.0.0.1:3000", "X-Forwarded-For": "::1"},
+    ):
+        assert client.get("/api/materials", headers=local_hdrs).status_code == 200
+        assert (
+            client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 2, "method": "ping"},
+                headers=local_hdrs,
+            ).status_code
+            == 200
+        )
+
+    # Re-enabling Tailscale restores remote access
+    r_enable = client.post("/api/system/settings", json={"tailscale_enabled": True})
+    assert r_enable.status_code == 200
+    assert r_enable.json()["settings"]["tailscale_enabled"] is True
+
+    for hdrs in remote_header_variants:
+        assert client.get("/api/materials", headers=hdrs).status_code == 200
+        assert (
+            client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 3, "method": "ping"},
+                headers=hdrs,
+            ).status_code
+            == 200
+        )
+        # Reaches transcript route (returns 400 for invalid URL instead of 403 guard)
+        r_tf_ok = client.post(
+            "/api/transcript/fetch",
+            json={"urlOrId": "invalid", "stream": False},
+            headers=hdrs,
+        )
+        assert r_tf_ok.status_code == 400
+
+
+def test_coaching_agent_is_tool_free_and_falls_back_on_timeout(monkeypatch: pytest.MonkeyPatch):
+    """Lightweight coaching agent has no tools and falls back deterministically on timeout."""
+    from adk_backend.agents import shadowing_agent
+
+    agent = shadowing_agent.create_coaching_agent()
+    assert agent.tools == []
+    assert "/no_think" in agent.instruction
+
+    captured_prompts: list[str] = []
+
+    async def slow_execute_json(*, agent, prompt: str, initial_state=None, schema_model=None):
+        captured_prompts.append(prompt)
+        raise asyncio.TimeoutError("simulated slow local CPU")
+
+    monkeypatch.setattr(shadowing_agent, "execute_adk_agent_json", slow_execute_json)
+
+    long_text = "word " * 120
+    det = shadowing_agent.create_deterministic_shadowing_report(
+        target_text=long_text,
+        spoken_text="word " * 10,
+        language="en",
+        mode="simultaneous",
+        duration_sec=10.0,
+        target_duration_sec=12.0,
+        simulated_take=True,
+    )
+    res = asyncio.run(
+        shadowing_agent.generate_coaching_and_merge(det, language="en", mode="simultaneous")
+    )
+    assert res["coachingSource"] == "deterministic_fallback"
+    assert res["status"] == "partial_coaching"
+    assert res["scoreExplanation"]
+    assert len(captured_prompts) == 1
+    payload_str = captured_prompts[0].split("<shadowing_evidence>\n", 1)[1].rsplit("\n</shadowing_evidence>", 1)[0]
+    payload = json.loads(payload_str)
+    assert len(payload["targetText"]) <= 240
+    assert len(payload["recognizedText"]) <= 240
+    assert len(payload["mismatchedWords"]) <= 8
+
+
+def test_pitch_contour_caps_frames_and_analyze_skips_whisper_and_forwards_window(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Pitch contour caps evaluated frames on long audio, and /analyze skips Whisper when recognized_text is given."""
+    import io
+    import math
+    import time
+    import wave
+    from array import array
+    from adk_backend.agents import shadowing_agent
+    from adk_backend.routes import shadowing_routes
+    from adk_backend.tools import whisper_tools
+
+    # 1. 120s @ 16kHz synthetic voiced wave -> _extract_pitch_contour stays fast & <= 205 voiced frames
+    sr = 16000
+    one_sec = [int(10000 * math.sin(2.0 * math.pi * 160.0 * i / sr)) for i in range(sr)]
+    long_samples = array("h", one_sec * 120)
+    t0 = time.perf_counter()
+    contour_res = whisper_tools._extract_pitch_contour(long_samples, sr)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.5
+    assert 50 <= contour_res["voicedFrames"] <= 205
+    assert len(contour_res["pitchContour"]) <= 120
+
+    # 2. /api/shadowing/analyze skips transcribe_audio_with_whisper when recognized_text is provided
+    #    and forwards start_sec / end_sec to compare_with_reference_wav
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(array("h", one_sec * 2).tobytes())
+    wav_bytes = buf.getvalue()
+
+    whisper_calls = 0
+    captured_window: list[tuple[float | None, float | None]] = []
+
+    async def fail_if_called(*args, **kwargs):
+        nonlocal whisper_calls
+        whisper_calls += 1
+        raise AssertionError("transcribe_audio_with_whisper must not run when recognized_text is non-empty")
+
+    def fake_compare(learner_acoustics, video_id=None, start_sec=None, end_sec=None):
+        captured_window.append((start_sec, end_sec))
+        return {"hasReference": False, "referencePitchContour": []}
+
+    async def fake_adk(*args, **kwargs):
+        return {
+            "scoreExplanation": "Good pacing.",
+            "pronunciationFeedback": [],
+            "intonationTips": ["Steady pitch."],
+            "improvementSuggestions": ["Keep going."],
+        }
+
+    monkeypatch.setattr(shadowing_routes, "transcribe_audio_with_whisper", fail_if_called)
+    monkeypatch.setattr(shadowing_routes, "compare_with_reference_wav", fake_compare)
+    monkeypatch.setattr(shadowing_agent, "execute_adk_agent_json", fake_adk)
+
+    resp = client.post(
+        "/api/shadowing/analyze",
+        data={
+            "target_text": "Hello and welcome to EchoLearning.",
+            "language": "en",
+            "mode": "simultaneous",
+            "recognized_text": "Hello and welcome to EchoLearning",
+            "video_id": "dQw4w9WgXcQ",
+            "start_sec": "12.5",
+            "end_sec": "24.0",
+        },
+        files={"audio": ("take.wav", wav_bytes, "audio/wav")},
+    )
+    assert resp.status_code == 200
+    assert whisper_calls == 0
+    assert captured_window == [(12.5, 24.0)]
