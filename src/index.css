@@ -261,10 +261,6 @@ rt {
   gap: 16px;
 }
 
-.echo-studio {
-  align-items: start;
-}
-
 .echo-settings {
   margin-top: 16px;
 }
@@ -288,6 +284,22 @@ rt {
 .echo-media {
   grid-area: 1 / 2;
   min-width: 0;
+}
+
+@media (min-width: 900px) {
+  .echo-studio {
+    align-items: stretch;
+  }
+  .echo-reader {
+    position: relative;
+    min-height: 520px;
+    height: 100%;
+  }
+  .echo-reader > div {
+    position: absolute;
+    inset: 0;
+    height: 100% !important;
+  }
 }
 
 .echo-video-title {

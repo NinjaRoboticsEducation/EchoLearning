@@ -197,9 +197,9 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl flex flex-col h-[520px] lg:h-[680px] overflow-hidden min-w-0">
+    <div className="bg-white border border-slate-200 rounded-xl flex flex-col h-[520px] overflow-hidden min-w-0">
       {/* Reader Header & Display Controls */}
-      <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 min-w-0">
+      <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 min-w-0 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <BookOpen className="w-4 h-4 text-sky-600 shrink-0" />
           <h2 className="text-sm font-semibold text-slate-900 truncate">
@@ -238,7 +238,7 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
       </div>
 
       {/* Sub-bar: Segment Range Selection */}
-      <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+      <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <span>
             Practice Scope:{' '}
@@ -264,7 +264,7 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
       {/* Scrollable Synchronized Segments */}
       <div
         ref={scrollContainerRef}
-        className="flex-1 min-h-0 overflow-y-auto transcript-scroll divide-y divide-slate-100"
+        className="flex-1 min-h-0 overflow-y-auto transcript-scroll divide-y divide-slate-100 pb-2"
       >
         {segments.map((segment, idx) => {
           const isActive = idx === activeSegmentIndex;
