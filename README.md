@@ -108,8 +108,8 @@ flowchart TD
 
 1. **Caption & ASR Ingestion:** When you paste a YouTube link, EchoLearning downloads the authentic subtitle tracks. If no subtitles exist, it downloads audio using `yt-dlp` and runs local `whisper-server` to generate verbatim transcripts automatically.
 2. **Grammar & Furigana Tokenization:** Japanese text is tokenized into morphemes using `fugashi` (MeCab + UniDic). Every Kanji character receives accurate Hiragana Furigana (`<ruby>` annotations) and mora counts.
-3. **Studio Practice & Voice Capture:** In the Practice Studio, choose between sentence-by-sentence **Listen-Then-Repeat** or continuous **Simultaneous Shadowing** (up to 60 minutes). During Simultaneous practice, microphone audio is captured at 16 kHz mono PCM and streamed to Whisper in adaptive 5–14s background chunks.
-4. **S05 Streaming Whisper Speech Preview:** The **AI Recognized Speech** panel appears immediately as soon as you start recording and displays your recognized speech incrementally and simultaneously in real time. Powered by local `whisper-server` (`large-v3-turbo` with `--best-of 1 --beam-size 1 --no-fallback --audio-ctx 768` for 3x faster CPU inference), your complete transcript is already visible upon clicking **Finish Recording** (requiring at most a brief 1–3s tail flush), with **Play Recorded Audio** reproducing 100% of your take from `0:00` to the end.
+3. **Studio Practice & Voice Capture:** In the Practice Studio, choose between sentence-by-sentence **Listen-Then-Repeat** or continuous **Simultaneous Shadowing** (up to 60 minutes). During Simultaneous practice, microphone audio is captured at 16 kHz mono PCM and streamed to Whisper in pause-aligned 6–18s background slices without cutting off words or dropping tail audio.
+4. **S05 Streaming Whisper Speech Preview:** The **AI Recognized Speech** panel appears immediately as soon as you start recording and displays your recognized speech in real time. Powered by local `whisper-server` (`large-v3-turbo` configured via `scripts/start_whisper.sh` with `--max-context 0 --entropy-thold 2.20 --suppress-nst`, full 1500-frame encoder context, and `clean_whisper_repetitions` loop filtering), Listen-Then-Repeat previews live speech recognition while you speak and transcribes your complete uncut sentence in one pass when you finish, while Simultaneous Mode streams pause-aligned slices cleanly without losing tail audio. Complete audio is immediately playable from `0:00` to the end via **Play Recorded Audio**.
 5. **Pragmatic Local Acoustic Analysis:** EchoLearning extracts fundamental pitch frequency ($F_0$), pauses ($\ge 350\text{ ms}$), speaking rate (WPM in English / Moras/min in Japanese), and volume dynamics.
 6. **ADK 2.x Coaching:** The Google ADK `ShadowingAgent` combines acoustic telemetry with local Qwen3.5 intelligence to deliver an encouraging, constructive evaluation in your preferred interface language.
 
@@ -293,7 +293,7 @@ cd EchoLearning
 ```
 *`start_all.sh` (which invokes `./scripts/start.sh`) launches all four coordinated background services:*
 - 🧠 **`llama-server`** (:8080) — Local Qwen3.5 LLM engine with Apple Metal GPU offload or AVX2 CPU acceleration.
-- 🎙️ **`whisper-server`** (:8081) — Local Whisper Large-v3-Turbo speech recognition engine configured with `--best-of 1 --beam-size 1 --no-fallback --audio-ctx 768` for 3x faster CPU inference.
+- 🎙️ **`whisper-server`** (:8081) — Local Whisper Large-v3-Turbo speech recognition engine configured via `scripts/start_whisper.sh` with `--max-context 0 --entropy-thold 2.20 --suppress-nst` and full encoder context (`1500` frames) plus repetition-loop filtering (`clean_whisper_repetitions`), preventing Whisper decoding loops in both Japanese and English.
 - 🚀 **`uvicorn` (FastAPI + Google ADK Backend)** (:3000) — Studio REST API, SQLite persistence, and Streamable HTTP MCP endpoint.
 - ⚡ **`vite` Dev Server** (:5173) — Interactive React 19 UI with hot-module reloading (opens automatically in your browser).
 
@@ -414,10 +414,13 @@ When you are ready to practice in the **Practice Studio**, EchoLearning provides
 │                              CHOOSE YOUR SHADOWING MODE                                │
 ├────────────────────────────────────────────────────────────────────────────────────────┤
 │  🎯 Listen-Then-Repeat Mode   Video plays 1 sentence → pauses → you repeat & record.   │
+│                               Live preview while speaking; complete uncut sentence     │
+│                               transcribed in one pass on finish.                       │
 │                               Best for beginners focusing on phonetic precision.       │
 │                                                                                        │
 │  🌊 Simultaneous Shadowing    Video plays continuously up to 60 minutes uninterrupted. │
-│                               Microphone audio streams live in 10-second chunks.       │
+│                               Microphone streams pause-aligned 6–18s slices cleanly    │
+│                               in the background without cutting words or tail audio.   │
 │                               Best for intermediate/advanced learners building rhythm. │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -425,17 +428,18 @@ When you are ready to practice in the **Practice Studio**, EchoLearning provides
 #### Mode 1: Listen-Then-Repeat Mode (Sentence-by-Sentence Precision)
 - **How it works:** The video plays a single sentence, pauses automatically at the end of the phrase, and starts recording your microphone.
 - **Why use it:** When studying fast-paced Japanese conversation, unfamiliar vocabulary, or complex English sentence structures, this mode allows you to absorb the native speaker's accent, pitch accent, and rhythm before repeating it.
-- **Instant Preview:** When you click **Finish Recording**, local `whisper-server` (`large-v3-turbo`) transcribes your take on-device in under a second.
+- **Live Preview & Complete Uncut Transcription:** While you speak, the **AI Recognized Speech** panel previews live speech recognition in real time. When you click **Finish Recording**, local `whisper-server` transcribes your complete uncut sentence in a single pass with full acoustic fidelity (in ~1 second), ensuring that no initial words, hesitation pauses, or sentence-final particles are fragmented or truncated.
 
 #### Mode 2: Continuous Simultaneous Shadowing (Up to 60 Minutes Continuous Practice)
 - **How it works:** The YouTube video plays continuously without interruption while you speak along in real time—trailing just a split second behind the speaker, exactly like a professional conference interpreter!
 - **Continuous Practice up to 60 Minutes (3,600 Seconds):** You are not restricted to short clips. Whether you want to shadow a 5-minute news summary, a 20-minute TED Talk, or an entire **60-minute (3,600-second)** podcast, documentary, or university lecture, EchoLearning supports continuous practice sessions with zero memory leaks or browser crashes. When you reach the 60-minute mark, the studio automatically wraps up and finalizes your session safely.
 - **Real-Time Streaming Whisper Recognition:** Traditional speech apps make you wait while a 20- or 30-minute audio file uploads and processes after you stop. EchoLearning does the heavy lifting **live while you speak**:
   1. **Immediate Panel Activation:** The **AI Recognized Speech** panel appears immediately as soon as you start recording. You never have to wait until recording finishes to know whether your microphone is active and picking up your voice.
-  2. **Incremental & Simultaneous Live Recognition:** The panel displays your recognized speech **incrementally and simultaneously** in real time. It combines instant live speech recognition with adaptive 5–14s background audio chunks captured at 16 kHz mono PCM in browser memory.
-  3. **3x Faster CPU Inference:** Background chunks stream to your local `whisper-server` (`large-v3-turbo` running on port `8081`), which is configured with `--best-of 1 --beam-size 1 --no-fallback --audio-ctx 768` for **3x faster CPU inference**. Text is transcribed with minimal CPU footprint, appending smoothly without lagging playback.
-  4. **Complete Transcription on Finish Recording:** When you click **Finish Recording**, the complete transcription is already visible in the **AI Recognized Speech** panel (requiring at most a brief 1–3s tail flush for the final remaining audio snippet).
-  5. **100% Full Audio Playback (`0:00` to End):** Clicking **Play Recorded Audio** reproduces **100% of your entire shadowing recording from `0:00` to the end**, giving you full fidelity playback of your practice session before running acoustic grading.
+  2. **Incremental & Simultaneous Live Recognition:** The panel displays your recognized speech **incrementally and simultaneously** in real time, combining immediate browser live speech previews with background Whisper inference.
+  3. **Pause-Aligned 6–18s Slices Without Cutting Off Words:** Instead of naive fixed-time slicing that cuts audio mid-syllable, EchoLearning uses intelligent low-energy silence boundary detection (`splitPcmAtSilenceBoundary`). Speech streams cleanly in the background as pause-aligned 6–18s slices (triggered once 8 seconds of speech accumulate), preserving natural word and phrase boundaries without chopping words in half.
+  4. **Robust Whisper-Server Configuration & Loop Prevention:** `scripts/start_whisper.sh` configures local `whisper-server` (`large-v3-turbo` on port `8081`) with `--max-context 0 --entropy-thold 2.20 --suppress-nst` and full encoder context (`1500` frames). Paired with Python-side `clean_whisper_repetitions` and frontend repetition filtering, this eliminates Whisper autoregressive repetition loops (e.g., looping phrases on background noise or trailing silence) in both Japanese and English.
+  5. **Zero Tail-Audio Loss on Finish Recording:** When you click **Finish Recording**, the pipeline automatically flushes and drains all remaining audio chunks—even for short final utterances—so your complete transcription is fully rendered with zero lost tail audio (requiring at most a brief 1–3s tail flush).
+  6. **100% Full Audio Playback (`0:00` to End):** Clicking **Play Recorded Audio** reproduces **100% of your entire shadowing recording from `0:00` to the end**, giving you full fidelity playback of your practice session before running acoustic grading.
 
 #### 🔄 Visual Workflow: Real-Time Streaming Whisper Recognition
 
@@ -443,25 +447,26 @@ When you are ready to practice in the **Practice Studio**, EchoLearning provides
 flowchart TD
     subgraph LIVE ["🎙️ Live Continuous Shadowing (Up to 60 Minutes)"]
         MIC["🗣️ Microphone Input<br/>(16 kHz Mono PCM Voice)"] --> CAP["🎛️ Audio Worklet Capture &<br/>Instant Live Recognition"]
-        CAP --> BUF["📦 Adaptive Audio Chunks<br/>(5–14s Chunks @ 16 kHz Mono WAV)"]
+        CAP --> BUF["📦 Pause-Aligned Audio Slices<br/>(6–18s Low-Energy Slices @ 16 kHz)"]
     end
 
-    subgraph BG ["⚡ Background Streaming Pipeline (3x Faster CPU Inference)"]
-        BUF --> QUEUE["🔄 Sequential Background Queue<br/>(Zero-Lag Non-Overloading Pipeline)"]
-        QUEUE --> WHISPER["🧠 Local whisper-server (:8081)<br/>(Whisper Large-v3-Turbo<br/><code>--best-of 1 --beam-size 1<br/>--no-fallback --audio-ctx 768</code>)"]
+    subgraph BG ["⚡ Background Streaming Pipeline (Loop-Free Whisper)"]
+        BUF --> QUEUE["🔄 Sequential Background Queue<br/>(Pause-Aligned Silence Boundary Slices)"]
+        QUEUE --> WHISPER["🧠 Local whisper-server (:8081)<br/>(Whisper Large-v3-Turbo<br/><code>--max-context 0 --entropy-thold 2.20<br/>--suppress-nst (1500 Frames Context)</code>)"]
+        WHISPER --> CLEAN["🧹 Repetition-Loop Filter<br/>(<code>clean_whisper_repetitions</code><br/>Japanese & English Loop Prevention)"]
     end
 
     subgraph UI ["💻 Immediate AI Recognized Speech Panel"]
         CAP -. "Instant Live Speech" .-> LIVE_TEXT["📝 AI Recognized Speech Panel<br/>(Appears immediately; incremental & simultaneous display)"]
-        WHISPER --> LIVE_TEXT
-        STOP["⏹️ Click 'Finish Recording'<br/>(Brief 1–3s tail flush)"] --> FAST["⚡ Complete Transcript Ready!<br/>• Full take visible immediately<br/>• 'Play Recorded Audio' (100% from 0:00 to end)<br/>• 'Analyze Shadowing Result' ready"]
+        CLEAN --> LIVE_TEXT
+        STOP["⏹️ Click 'Finish Recording'<br/>(Drains full tail audio; 1–3s flush)"] --> FAST["⚡ Complete Transcript Ready!<br/>• Full take visible immediately (zero cutoffs)<br/>• 'Play Recorded Audio' (100% from 0:00 to end)<br/>• 'Analyze Shadowing Result' ready"]
     end
 
     classDef primary fill:#2563eb,stroke:#1d4ed8,color:#ffffff,stroke-width:2px;
     classDef bg fill:#7c3aed,stroke:#6d28d9,color:#ffffff,stroke-width:2px;
     classDef ui fill:#059669,stroke:#047857,color:#ffffff,stroke-width:2px;
     class MIC,CAP,BUF primary;
-    class QUEUE,WHISPER bg;
+    class QUEUE,WHISPER,CLEAN bg;
     class LIVE_TEXT,STOP,FAST ui;
 ```
 
@@ -471,8 +476,11 @@ flowchart TD
 | :--- | :--- | :--- |
 | **Playback Style** | Sentence-by-sentence (auto-pauses after each line) | Continuous uninterrupted playback |
 | **Session Length** | Per-sentence clips (~5–30 seconds) | **Continuous long-form up to 60 minutes (3,600s)** |
-| **AI Recognized Speech Panel** | Appears immediately upon recording; finalizes in < 1s | **Appears immediately upon recording; live incremental display** |
-| **Recognition Pipeline** | Instant on-device Whisper transcription | **Instant live recognition + adaptive 5–14s Whisper chunks (3x faster CPU inference)** |
+| **AI Recognized Speech Panel** | Appears immediately upon recording; live preview while speaking | **Appears immediately upon recording; live incremental display** |
+| **Recognition Pipeline** | Live speech preview + single-pass transcription of complete uncut sentence | **Live speech preview + pause-aligned 6–18s slices in background (full 1500-frame context, loop filtering)** |
+| **Sentence Integrity** | Complete uncut sentence transcribed in one pass (no early splits) | **Pause-aligned silence boundaries (`splitPcmAtSilenceBoundary`); never cuts words mid-speech** |
+| **Tail Audio Handling** | Full audio buffer preserved and transcribed | **Complete tail drain on finish recording (zero lost ending speech)** |
+| **Whisper Decoding Stability** | `--max-context 0 --entropy-thold 2.20 --suppress-nst` + `clean_whisper_repetitions` loop filter | `--max-context 0 --entropy-thold 2.20 --suppress-nst` + `clean_whisper_repetitions` loop filter |
 | **Finalization Time** | < 1 second | **Near-instant (1–3s brief tail flush)** |
 | **Recorded Audio Playback** | Complete sentence take | **100% entire recording from `0:00` to the end** |
 | **Live Visual Feedback** | Displays target sentence + live 60fps volume meter | Displays live accumulating recognized speech in AI panel simultaneously |
@@ -488,7 +496,7 @@ The **AI Recognized Speech** panel provides continuous visual clarity both durin
 ├────────────────────────────────────────────────────────────────────────┤
 │ Target:     "The only way to do great work is to love what you do."    │
 │ You Spoke:  "The only way to do great work is to love what you do..."  │
-│ Status:     Incremental live transcription stream (3x faster CPU Whisper)│
+│ Status:     Incremental live stream (pause-aligned slices & loop filtering)│
 │                                                                        │
 │ [ ⏹️ Finish Recording ]                                                 │
 ├────────────────────────────────────────────────────────────────────────┤
@@ -498,7 +506,9 @@ The **AI Recognized Speech** panel provides continuous visual clarity both durin
 ```
 
 - **During Live Recording:** The panel appears as soon as recording starts, displaying a live pulsing streaming badge (`Live Streaming · X.Xs` or `Transcribing chunk...`) and accumulating your words dynamically in real time.
-- **Upon Clicking "Finish Recording":** Because speech recognition has already processed the recording in the background, your complete transcription is already visible on screen (requiring at most a brief 1–3s tail flush for the final audio chunk).
+- **Upon Clicking "Finish Recording":**
+  - In **Listen-Then-Repeat Mode**, EchoLearning transcribes your complete uncut take in a single pass with full context.
+  - In **Simultaneous Mode**, because speech recognition has already processed background slices and cleanly drained tail audio without dropping any samples, your complete transcription is already visible on screen (requiring at most a brief 1–3s tail flush).
 - **Play Recorded Audio:** Click **Play Recorded Audio** to listen to **100% of your entire shadowing recording from `0:00` to the end** with the built-in HTML5 player.
 - **Analyze Shadowing Result:** Click **Analyze Shadowing Result** whenever you are ready to generate your comprehensive S06 acoustic prosody report!
 

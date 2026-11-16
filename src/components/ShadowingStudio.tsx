@@ -25,11 +25,13 @@ import {
 } from '../types';
 import {
   blobToBase64,
+  cleanRepetitionLoops,
   computePcmTelemetry,
   concatFloat32Arrays,
   downsampleTo16kMono,
   encodeWav16kMono,
   float32ToPcm16Wav,
+  splitPcmAtSilenceBoundary,
 } from '../utils/audio';
 import { formatTimestamp, YouTubePlayerHandle } from './YouTubePlayer';
 
@@ -94,9 +96,10 @@ interface ShadowingStudioProps {
 }
 
 const MAX_RECORDING_SEC = 3600;
-const MIN_STREAM_CHUNK_SAMPLES = 16000 * 5;
-const MAX_STREAM_WINDOW_SAMPLES = 16000 * 14;
-const MAX_FINALIZE_TAIL_SAMPLES = 16000 * 12;
+const MIN_STREAM_TRIGGER_SAMPLES = 16000 * 8;
+const MIN_STREAM_CHUNK_SAMPLES = 16000 * 6;
+const MAX_STREAM_CHUNK_SAMPLES = 16000 * 18;
+const MAX_DRAIN_CHUNK_SAMPLES = 16000 * 20;
 const MIN_TAIL_SAMPLES = Math.floor(16000 * 0.35);
 
 function normalizeReportFromAnalyzeApi(
@@ -304,6 +307,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const streamQueuePromiseRef = useRef<Promise<void>>(Promise.resolve());
   const activeStreamCountRef = useRef<number>(0);
   const speechRecognitionRef = useRef<any>(null);
+  const webSpeechFinalRef = useRef<string>('');
+  const webSpeechInterimRef = useRef<string>('');
   const webSpeechLiveRef = useRef<string>('');
   const whisperCoveredWebSpeechLenRef = useRef<number>(0);
 
@@ -406,6 +411,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     };
     streamQueuePromiseRef.current = Promise.resolve();
     activeStreamCountRef.current = 0;
+    webSpeechFinalRef.current = '';
+    webSpeechInterimRef.current = '';
     webSpeechLiveRef.current = '';
     whisperCoveredWebSpeechLenRef.current = 0;
     setLiveRecognizedText('');
@@ -626,8 +633,9 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
             streamedMetricsRef.current.whisperError = String(data.whisperError);
           }
 
-          const recognized =
-            typeof data.recognizedText === 'string' ? data.recognizedText.trim() : '';
+          const recognized = cleanRepetitionLoops(
+            typeof data.recognizedText === 'string' ? data.recognizedText.trim() : ''
+          );
           if (recognized) {
             streamedTextPartsRef.current.push(recognized);
             whisperCoveredWebSpeechLenRef.current = Math.max(
@@ -662,17 +670,26 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       recordingSecRef.current = elapsed;
       setRecordingSec(elapsed);
 
+      const activeMode = (pendingSnapshotRef.current || snapshot).mode;
       if (
+        activeMode === 'simultaneous' &&
         sessionStateRef.current === 'recording' &&
         activeStreamCountRef.current === 0 &&
-        unflushedSamplesCountRef.current >= MIN_STREAM_CHUNK_SAMPLES &&
+        unflushedSamplesCountRef.current >= MIN_STREAM_TRIGGER_SAMPLES &&
         unflushedChunksRef.current.length > 0
       ) {
-        const toFlush = unflushedChunksRef.current;
-        unflushedChunksRef.current = [];
-        unflushedSamplesCountRef.current = 0;
-        const slice = concatFloat32Arrays(toFlush, MAX_STREAM_WINDOW_SAMPLES);
-        enqueueStreamChunk(slice, pendingSnapshotRef.current || snapshot, generation);
+        const { flushSlice, remainingChunks, remainingSamples } =
+          splitPcmAtSilenceBoundary(
+            unflushedChunksRef.current,
+            MIN_STREAM_CHUNK_SAMPLES,
+            MAX_STREAM_CHUNK_SAMPLES,
+            16000
+          );
+        unflushedChunksRef.current = remainingChunks;
+        unflushedSamplesCountRef.current = remainingSamples;
+        if (flushSlice.length > 0) {
+          enqueueStreamChunk(flushSlice, pendingSnapshotRef.current || snapshot, generation);
+        }
       }
     }, 150);
   };
@@ -689,29 +706,156 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     try {
       if (pcmChunksRef.current.length > 0) {
         const capturedPcmChunks = pcmChunksRef.current;
-        const hasLiveText =
-          streamedTextPartsRef.current.length > 0 ||
-          webSpeechLiveRef.current.trim().length > 0;
 
-        if (activeStreamCountRef.current > 0) {
-          await waitWithTimeout(streamQueuePromiseRef.current, hasLiveText ? 4000 : 6000);
-          if (generation !== captureGeneration.current) return;
+        if (snapshot.mode === 'listen_repeat' && streamedTextPartsRef.current.length === 0) {
+          unflushedChunksRef.current = [];
+          unflushedSamplesCountRef.current = 0;
+
+          let fullPcm = concatFloat32Arrays(capturedPcmChunks);
+          if (
+            rawBlob.size > 0 &&
+            fullPcm.length / 16000 < Math.max(1.5, recordingSecRef.current * 0.75)
+          ) {
+            try {
+              const recovered = await encodeWav16kMono(rawBlob);
+              if (generation !== captureGeneration.current) return;
+              if (recovered.durationSec > fullPcm.length / 16000) {
+                const buf = await recovered.wavBlob.arrayBuffer();
+                if (generation !== captureGeneration.current) return;
+                if (buf.byteLength > 44) {
+                  const view = new DataView(buf, 44);
+                  const sampleCount = Math.floor((buf.byteLength - 44) / 2);
+                  const recoveredPcm = new Float32Array(sampleCount);
+                  for (let i = 0; i < sampleCount; i += 1) {
+                    recoveredPcm[i] = view.getInt16(i * 2, true) / 32768;
+                  }
+                  fullPcm = recoveredPcm;
+                }
+              }
+            } catch {
+              // Keep captured PCM if MediaRecorder decoding fails
+            }
+          }
+
+          const fullTelemetry = computePcmTelemetry(fullPcm, 16000);
+          const fullWavBlob = float32ToPcm16Wav(fullPcm, 16000);
+
+          revokeActiveAudioUrl();
+          const playbackUrl = URL.createObjectURL(fullWavBlob);
+          activeUrlRef.current = playbackUrl;
+          setRecordedAudioUrl(playbackUrl);
+          setRecordedWavBlob(fullWavBlob);
+
+          let recognizedText = '';
+          let whisperError: string | undefined;
+          let pauseCount = 0;
+          let silenceRatio = fullTelemetry.silenceRatio;
+          let rmsDb = fullTelemetry.rmsDb;
+          let durationSec =
+            fullTelemetry.durationSec > 0 ? fullTelemetry.durationSec : durationFallback;
+          let isSilent = fullTelemetry.isSilent;
+          let pitchContour: number[] | undefined;
+
+          if (fullPcm.length > 0 && !fullTelemetry.isSilent) {
+            const controller = new AbortController();
+            const timeoutId = window.setTimeout(() => controller.abort(), 20000);
+            try {
+              const form = new FormData();
+              form.append('audio', fullWavBlob, 'take.wav');
+              form.append('language', snapshot.language);
+              form.append('target_text', snapshot.targetText);
+
+              const res = await fetch('/api/shadowing/transcribe', {
+                method: 'POST',
+                body: form,
+                signal: controller.signal,
+              });
+              if (generation !== captureGeneration.current) return;
+              const data = await res.json().catch(() => ({}));
+              if (generation !== captureGeneration.current) return;
+
+              if (!res.ok) {
+                whisperError =
+                  typeof data?.detail === 'string'
+                    ? data.detail
+                    : data?.error || `Local Whisper transcription failed (HTTP ${res.status}).`;
+              } else {
+                recognizedText = cleanRepetitionLoops(String(data.recognizedText ?? ''));
+                isSilent = Boolean(data.isSilent);
+                durationSec = Number(data.durationSec ?? durationSec);
+                rmsDb = Number(data.rmsDb ?? rmsDb);
+                pauseCount = Number(data.pauseCount ?? 0);
+                silenceRatio = Number(data.silenceRatio ?? silenceRatio);
+                if (Array.isArray(data.pitchContour) && data.pitchContour.length > 0) {
+                  pitchContour = data.pitchContour;
+                }
+                if (data.whisperError) {
+                  whisperError = String(data.whisperError);
+                }
+              }
+            } catch (err: any) {
+              if (generation !== captureGeneration.current) return;
+              whisperError =
+                err?.name === 'AbortError'
+                  ? 'Local Whisper transcription timed out.'
+                  : err?.message || 'Local Whisper transcription failed.';
+            } finally {
+              window.clearTimeout(timeoutId);
+            }
+          }
+
+          if (!recognizedText) {
+            recognizedText = cleanRepetitionLoops(webSpeechLiveRef.current.trim());
+          }
+          if (recognizedText.length > 0) {
+            isSilent = false;
+          }
+
+          const preview: TranscribePreviewResult = {
+            recognizedText,
+            isSilent,
+            durationSec,
+            rmsDb,
+            pauseCount,
+            silenceRatio,
+            pitchContour,
+            whisperError,
+            chunkCount: 1,
+          };
+
+          setPreviewResult(preview);
+          setTakeSnapshot(snapshot);
+          updateSessionState('ready');
+          return;
         }
 
         const tailSamples = unflushedSamplesCountRef.current;
-        const tailChunks = unflushedChunksRef.current;
+        let tailChunks = unflushedChunksRef.current;
         unflushedChunksRef.current = [];
         unflushedSamplesCountRef.current = 0;
 
-        if (
-          activeStreamCountRef.current === 0 &&
-          tailSamples >= MIN_TAIL_SAMPLES &&
-          tailChunks.length > 0 &&
-          tailSamples <= MAX_FINALIZE_TAIL_SAMPLES
-        ) {
-          const tailSlice = concatFloat32Arrays(tailChunks);
-          enqueueStreamChunk(tailSlice, snapshot, generation);
-          await waitWithTimeout(streamQueuePromiseRef.current, 6000);
+        if (tailSamples >= MIN_TAIL_SAMPLES && tailChunks.length > 0) {
+          let remaining = tailSamples;
+          while (remaining > MAX_DRAIN_CHUNK_SAMPLES && tailChunks.length > 0) {
+            const split = splitPcmAtSilenceBoundary(
+              tailChunks,
+              MIN_STREAM_CHUNK_SAMPLES,
+              MAX_STREAM_CHUNK_SAMPLES,
+              16000
+            );
+            if (split.flushSlice.length === 0) break;
+            enqueueStreamChunk(split.flushSlice, snapshot, generation);
+            tailChunks = split.remainingChunks;
+            remaining = split.remainingSamples;
+          }
+          if (remaining >= MIN_TAIL_SAMPLES && tailChunks.length > 0) {
+            const tailSlice = concatFloat32Arrays(tailChunks);
+            enqueueStreamChunk(tailSlice, snapshot, generation);
+          }
+        }
+
+        if (activeStreamCountRef.current > 0) {
+          await waitWithTimeout(streamQueuePromiseRef.current, 25000);
           if (generation !== captureGeneration.current) return;
         }
 
@@ -750,10 +894,14 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         setRecordedAudioUrl(playbackUrl);
         setRecordedWavBlob(fullWavBlob);
 
-        const whisperText = streamedTextPartsRef.current
-          .join(snapshot.language === 'ja' ? '' : ' ')
-          .trim();
-        const recognizedText = whisperText || webSpeechLiveRef.current.trim();
+        const whisperText = cleanRepetitionLoops(
+          streamedTextPartsRef.current
+            .join(snapshot.language === 'ja' ? '' : ' ')
+            .trim()
+        );
+        const recognizedText = cleanRepetitionLoops(
+          whisperText || webSpeechLiveRef.current.trim()
+        );
         const activeRms = streamedMetricsRef.current.activeRmsValues;
         const reportedRmsDb = !fullTelemetry.isSilent
           ? fullTelemetry.rmsDb
@@ -815,7 +963,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       }
 
       const preview: TranscribePreviewResult = {
-        recognizedText: String(data.recognizedText ?? ''),
+        recognizedText: cleanRepetitionLoops(String(data.recognizedText ?? '')),
         isSilent: Boolean(data.isSilent),
         durationSec: Number(data.durationSec ?? durationSec ?? durationFallback),
         rmsDb: Number(data.rmsDb ?? rmsDb ?? -60),
@@ -923,26 +1071,37 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
             rec.lang = snapshot.language === 'ja' ? 'ja-JP' : 'en-US';
             rec.onresult = (event: any) => {
               if (generation !== captureGeneration.current) return;
-              let finalPart = '';
-              let interimPart = '';
-              for (let i = 0; i < event.results.length; i += 1) {
-                const res = event.results[i];
-                const text = String(res?.[0]?.transcript || '');
-                if (res?.isFinal) {
-                  finalPart += text;
+              const sep = snapshot.language === 'ja' ? '' : ' ';
+              let interim = '';
+              for (let i = event.resultIndex; i < event.results.length; i += 1) {
+                const piece = String(event.results[i]?.[0]?.transcript || '');
+                if (event.results[i]?.isFinal) {
+                  webSpeechFinalRef.current += piece + sep;
                 } else {
-                  interimPart += text;
+                  interim += piece;
                 }
               }
-              const sep = snapshot.language === 'ja' ? '' : ' ';
-              webSpeechLiveRef.current = [finalPart.trim(), interimPart.trim()]
-                .filter(Boolean)
-                .join(sep)
-                .trim();
+              webSpeechInterimRef.current = interim;
+              webSpeechLiveRef.current = cleanRepetitionLoops(
+                (webSpeechFinalRef.current + interim).trim()
+              );
               setLiveRecognizedText(computeCombinedLiveText(snapshot.language));
             };
             rec.onerror = () => {
               // Non-fatal; local Whisper streaming remains primary
+            };
+            rec.onend = () => {
+              if (
+                generation === captureGeneration.current &&
+                sessionStateRef.current === 'recording' &&
+                speechRecognitionRef.current
+              ) {
+                try {
+                  speechRecognitionRef.current.start();
+                } catch {
+                  // Ignore restart race
+                }
+              }
             };
             rec.start();
             speechRecognitionRef.current = rec;

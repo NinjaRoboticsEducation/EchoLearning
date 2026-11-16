@@ -1252,3 +1252,18 @@ def test_long_simultaneous_wav_with_long_pause_not_marked_silent(
     err_res = asyncio.run(whisper_tools.transcribe_audio_with_whisper(wav_path, language="en"))
     assert err_res["whisperOnline"] is False
     assert err_res["error"] == "ReadTimeout"
+
+
+def test_clean_whisper_repetitions_collapses_loops():
+    """clean_whisper_repetitions collapses autoregressive Japanese repetition loops while preserving normal text."""
+    from adk_backend.tools.whisper_tools import clean_whisper_repetitions
+
+    assert clean_whisper_repetitions("ラピクとグーグとグーグとグーグとグーグ") == "ラピクとグーグ"
+    assert clean_whisper_repetitions("最も早く、最も早く、最も早く、最も早く") == "最も早く"
+    assert clean_whisper_repetitions("最大で最大で最大で最大で") == "最大で"
+    assert clean_whisper_repetitions("タクシーのタクシーのタクシーの") == "タクシーの"
+    assert clean_whisper_repetitions("無料プランでは、無料プランでは無料プランでは") == "無料プランでは"
+    # CJK segment spaces collapsed and legitimate non-looping text preserved
+    assert clean_whisper_repetitions("今日は いい 天気 です") == "今日はいい天気です"
+    assert clean_whisper_repetitions("hello world") == "hello world"
+

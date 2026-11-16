@@ -610,6 +610,19 @@ def compute_deterministic_word_diff(
     }
 
 
+def clean_whisper_repetitions(text: str) -> str:
+    """Removes autoregressive repetition loops (e.g. '最大で最大で最大で...') from Whisper output."""
+    if not text:
+        return ""
+    s = text.strip()
+    # Remove spaces inserted between CJK characters across Whisper internal segments
+    s = re.sub(r"(?<=[\u3040-\u30ff\u4e00-\u9faf])\s+(?=[\u3040-\u30ff\u4e00-\u9faf])", "", s)
+    # Collapse any 1..25 char phrase repeated >= 3 times consecutively (with optional punctuation/spaces)
+    for _ in range(5):
+        s = re.sub(r"(.{1,25}?)(?:[、,・\s]*\1){2,}", r"\1", s)
+    return s.strip()
+
+
 async def transcribe_audio_with_whisper(
     wav_path: Path,
     language: str = "en",
@@ -626,7 +639,6 @@ async def transcribe_audio_with_whisper(
                         "language": language,
                         "response_format": "verbose_json",
                         "temperature": "0.0",
-                        "temperature_inc": "0.0",
                     },
                 )
         if resp.status_code != 200:
@@ -639,7 +651,7 @@ async def transcribe_audio_with_whisper(
             }
 
         data = resp.json()
-        text = (data.get("text") or "").strip()
+        text = clean_whisper_repetitions(data.get("text") or "")
 
         words: list[dict[str, Any]] = []
         confidences: list[float] = []

@@ -48,7 +48,6 @@ exec "$WHISPER_BIN" \
   --port 8081 \
   --inference-path "/v1/audio/transcriptions" \
   --threads "$THREADS" \
-  --best-of 1 \
-  --beam-size 1 \
-  --no-fallback \
-  --audio-ctx 768
+  --max-context 0 \
+  --entropy-thold 2.20 \
+  --suppress-nst

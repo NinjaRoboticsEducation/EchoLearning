@@ -108,6 +108,97 @@ export function concatFloat32Arrays(chunks: Float32Array[], maxSamples?: number)
 }
 
 /**
+ * Removes autoregressive repetition loops (e.g. '最大で最大で最大で...') from transcript text.
+ */
+export function cleanRepetitionLoops(text: string): string {
+  if (!text) {
+    return '';
+  }
+  let s = text.trim();
+  // Remove spaces inserted between CJK characters across Whisper internal segments
+  s = s.replace(/(?<=[\u3040-\u30ff\u4e00-\u9faf])\s+(?=[\u3040-\u30ff\u4e00-\u9faf])/g, '');
+  // Collapse any 1..25 char phrase repeated >= 3 times consecutively (with optional punctuation/spaces)
+  for (let i = 0; i < 5; i += 1) {
+    s = s.replace(/(.{1,25}?)(?:[、,・\s]*\1){2,}/g, '$1');
+  }
+  return s.trim();
+}
+
+/**
+ * Splits buffered 16 kHz PCM chunks at a natural low-energy pause boundary without
+ * discarding any early samples. Keeps remaining audio in `remainingChunks`.
+ */
+export function splitPcmAtSilenceBoundary(
+  chunks: Float32Array[],
+  minSamples: number,
+  maxSamples: number,
+  sampleRate = 16000
+): { flushSlice: Float32Array; remainingChunks: Float32Array[]; remainingSamples: number } {
+  const all = concatFloat32Arrays(chunks);
+  if (all.length === 0) {
+    return {
+      flushSlice: new Float32Array(0),
+      remainingChunks: [],
+      remainingSamples: 0,
+    };
+  }
+
+  const winLen = 1600; // 100ms @ 16kHz
+  const step = 800; // 50ms @ 16kHz
+  const safeMin = Math.max(0, minSamples);
+  const safeMax = Math.max(safeMin + winLen, maxSamples);
+
+  const findQuietestWindow = (searchStart: number, searchEnd: number) => {
+    let bestPos = -1;
+    let bestRms = Number.POSITIVE_INFINITY;
+    for (let pos = searchEnd - winLen; pos >= searchStart; pos -= step) {
+      let sumSq = 0;
+      for (let i = pos; i < pos + winLen; i += 1) {
+        const v = all[i];
+        sumSq += v * v;
+      }
+      const rms = Math.sqrt(sumSq / winLen);
+      if (rms < bestRms) {
+        bestRms = rms;
+        bestPos = pos;
+      }
+    }
+    return { bestPos, bestRms };
+  };
+
+  let splitIdx = all.length;
+  if (all.length <= safeMax) {
+    const searchStart = Math.max(safeMin, all.length - sampleRate * 3);
+    if (all.length - searchStart >= winLen) {
+      const { bestPos, bestRms } = findQuietestWindow(searchStart, all.length);
+      if (bestPos !== -1 && bestRms < 0.025) {
+        splitIdx = bestPos + winLen / 2;
+      } else {
+        splitIdx = all.length;
+      }
+    } else {
+      splitIdx = all.length;
+    }
+  } else {
+    const searchStart = Math.max(safeMin, safeMax - sampleRate * 4);
+    if (safeMax - searchStart >= winLen) {
+      const { bestPos } = findQuietestWindow(searchStart, safeMax);
+      splitIdx = bestPos !== -1 ? bestPos + winLen / 2 : safeMax;
+    } else {
+      splitIdx = safeMax;
+    }
+  }
+
+  const flushSlice = all.slice(0, splitIdx);
+  const rem = splitIdx < all.length ? all.slice(splitIdx) : new Float32Array(0);
+  return {
+    flushSlice,
+    remainingChunks: rem.length > 0 ? [rem] : [],
+    remainingSamples: rem.length,
+  };
+}
+
+/**
  * Computes 50ms windowed RMS telemetry on 16 kHz mono PCM samples.
  * When >= 4 active speech windows (windowRms >= 0.012) are present, uses
  * active-window RMS for rmsDb so long pauses in Simultaneous mode do not
