@@ -23,7 +23,14 @@ import {
   TranscribePreviewResult,
   TranscriptSegment,
 } from '../types';
-import { blobToBase64, encodeWav16kMono } from '../utils/audio';
+import {
+  blobToBase64,
+  computePcmTelemetry,
+  concatFloat32Arrays,
+  downsampleTo16kMono,
+  encodeWav16kMono,
+  float32ToPcm16Wav,
+} from '../utils/audio';
 import { formatTimestamp, YouTubePlayerHandle } from './YouTubePlayer';
 
 export type RecordingSessionState =
@@ -83,7 +90,10 @@ interface ShadowingStudioProps {
   triggerRecordAgainRef?: React.MutableRefObject<(() => void) | null>;
 }
 
-const MAX_RECORDING_SEC = 595;
+const MAX_RECORDING_SEC = 3600;
+const STREAM_CHUNK_SAMPLES = 16000 * 10;
+const MIN_TAIL_SAMPLES = Math.floor(16000 * 0.35);
+const MAX_ANALYZE_WAV_SAMPLES = 16000 * 180;
 
 function normalizeReportFromAnalyzeApi(
   data: Record<string, any>,
@@ -233,6 +243,11 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   triggerRecordAgainRef,
 }) => {
   const [sessionState, setSessionState] = useState<RecordingSessionState>('idle');
+  const sessionStateRef = useRef<RecordingSessionState>('idle');
+  const updateSessionState = (next: RecordingSessionState) => {
+    sessionStateRef.current = next;
+    setSessionState(next);
+  };
   const [micError, setMicError] = useState<string | null>(null);
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
   const [recordingSec, setRecordingSec] = useState(0);
@@ -240,6 +255,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const [recordedWavBlob, setRecordedWavBlob] = useState<Blob | null>(null);
   const [previewResult, setPreviewResult] = useState<TranscribePreviewResult | null>(null);
   const [takeSnapshot, setTakeSnapshot] = useState<TakeSnapshot | null>(null);
+  const [liveRecognizedText, setLiveRecognizedText] = useState<string>('');
+  const [isStreamingChunk, setIsStreamingChunk] = useState<boolean>(false);
 
   const simultaneousStartVideoSecRef = useRef<number>(0);
   const [capturedSimultaneousSegments, setCapturedSimultaneousSegments] =
@@ -250,6 +267,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const silentGainRef = useRef<GainNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const timerIntervalRef = useRef<number | null>(null);
@@ -258,6 +277,28 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const captureGeneration = useRef(0);
   const activeUrlRef = useRef<string | null>(null);
   const pendingSnapshotRef = useRef<TakeSnapshot | null>(null);
+
+  const pcmChunksRef = useRef<Float32Array[]>([]);
+  const unflushedChunksRef = useRef<Float32Array[]>([]);
+  const unflushedSamplesCountRef = useRef<number>(0);
+  const streamedTextPartsRef = useRef<string[]>([]);
+  const streamedMetricsRef = useRef<{
+    voicedFrames: number;
+    pauseCount: number;
+    pitchContour: number[];
+    activeRmsValues: number[];
+    whisperError: string | null;
+    chunkCount: number;
+  }>({
+    voicedFrames: 0,
+    pauseCount: 0,
+    pitchContour: [],
+    activeRmsValues: [],
+    whisperError: null,
+    chunkCount: 0,
+  });
+  const streamQueuePromiseRef = useRef<Promise<void>>(Promise.resolve());
+  const activeStreamCountRef = useRef<number>(0);
 
   const effectiveSegments =
     mode === 'listen_repeat'
@@ -308,6 +349,25 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     }
   };
 
+  const resetStreamingState = () => {
+    pcmChunksRef.current = [];
+    unflushedChunksRef.current = [];
+    unflushedSamplesCountRef.current = 0;
+    streamedTextPartsRef.current = [];
+    streamedMetricsRef.current = {
+      voicedFrames: 0,
+      pauseCount: 0,
+      pitchContour: [],
+      activeRmsValues: [],
+      whisperError: null,
+      chunkCount: 0,
+    };
+    streamQueuePromiseRef.current = Promise.resolve();
+    activeStreamCountRef.current = 0;
+    setLiveRecognizedText('');
+    setIsStreamingChunk(false);
+  };
+
   const stopAllCaptureResources = () => {
     if (timerIntervalRef.current) {
       window.clearInterval(timerIntervalRef.current);
@@ -316,6 +376,23 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = null;
+    }
+    if (scriptProcessorRef.current) {
+      scriptProcessorRef.current.onaudioprocess = null;
+      try {
+        scriptProcessorRef.current.disconnect();
+      } catch {
+        // Ignore
+      }
+      scriptProcessorRef.current = null;
+    }
+    if (silentGainRef.current) {
+      try {
+        silentGainRef.current.disconnect();
+      } catch {
+        // Ignore
+      }
+      silentGainRef.current = null;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -400,7 +477,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     }
   }, [videoEndedCount]);
 
-  // Auto-stop recording at 600s backend ceiling (R03)
+  // Auto-stop recording at 3600s (60-minute) ceiling
   useEffect(() => {
     if (sessionState === 'recording' && recordingSec >= MAX_RECORDING_SEC) {
       handleFinishRecording();
@@ -421,16 +498,172 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     };
   };
 
+  const enqueueStreamChunk = (
+    slice: Float32Array,
+    snapshot: TakeSnapshot,
+    generation: number
+  ) => {
+    const telemetry = computePcmTelemetry(slice, 16000);
+    if (telemetry.isSilent) return;
+
+    const chunkWavBlob = float32ToPcm16Wav(slice, 16000);
+    activeStreamCountRef.current += 1;
+    setIsStreamingChunk(true);
+
+    streamQueuePromiseRef.current = streamQueuePromiseRef.current
+      .then(async () => {
+        if (generation !== captureGeneration.current) return;
+        try {
+          const form = new FormData();
+          form.append('audio', chunkWavBlob, 'chunk.wav');
+          form.append('language', snapshot.language);
+          form.append('target_text', snapshot.targetText);
+
+          const res = await fetch('/api/shadowing/transcribe', {
+            method: 'POST',
+            body: form,
+          });
+          const data = await res.json().catch(() => ({}));
+          if (generation !== captureGeneration.current) return;
+
+          if (!res.ok) {
+            const errDetail =
+              typeof data?.detail === 'string'
+                ? data.detail
+                : data?.error || `Local Whisper chunk failed (HTTP ${res.status}).`;
+            streamedMetricsRef.current.whisperError = errDetail;
+            return;
+          }
+
+          streamedMetricsRef.current.chunkCount += 1;
+          streamedMetricsRef.current.pauseCount += Number(data.pauseCount ?? 0);
+          if (typeof data.voicedFrames === 'number') {
+            streamedMetricsRef.current.voicedFrames += data.voicedFrames;
+          }
+          if (typeof data.rmsDb === 'number' && !data.isSilent) {
+            streamedMetricsRef.current.activeRmsValues.push(data.rmsDb);
+          }
+          if (Array.isArray(data.pitchContour) && data.pitchContour.length > 0) {
+            const combined = streamedMetricsRef.current.pitchContour.concat(
+              data.pitchContour.filter((v: unknown) => typeof v === 'number')
+            );
+            if (combined.length > 120) {
+              const step = combined.length / 120;
+              const downsampled: number[] = [];
+              for (let i = 0; i < 120; i += 1) {
+                downsampled.push(combined[Math.min(combined.length - 1, Math.floor(i * step))]);
+              }
+              streamedMetricsRef.current.pitchContour = downsampled;
+            } else {
+              streamedMetricsRef.current.pitchContour = combined;
+            }
+          }
+          if (data.whisperError) {
+            streamedMetricsRef.current.whisperError = String(data.whisperError);
+          }
+
+          const recognized =
+            typeof data.recognizedText === 'string' ? data.recognizedText.trim() : '';
+          if (recognized) {
+            streamedTextPartsRef.current.push(recognized);
+            setLiveRecognizedText(
+              streamedTextPartsRef.current.join(snapshot.language === 'ja' ? '' : ' ')
+            );
+          }
+        } catch (err: any) {
+          if (generation === captureGeneration.current) {
+            streamedMetricsRef.current.whisperError =
+              err?.message || 'Background Whisper chunk request failed.';
+          }
+        }
+      })
+      .finally(() => {
+        activeStreamCountRef.current = Math.max(0, activeStreamCountRef.current - 1);
+        if (generation === captureGeneration.current && activeStreamCountRef.current === 0) {
+          setIsStreamingChunk(false);
+        }
+      });
+  };
+
   const finalizeRecordedAudio = async (
     rawBlob: Blob,
     snapshot: TakeSnapshot,
     generation: number,
     durationFallback: number
   ) => {
-    setSessionState('finalizing');
+    updateSessionState('finalizing');
     setFinalizeError(null);
 
     try {
+      if (pcmChunksRef.current.length > 0) {
+        const capturedPcmChunks = pcmChunksRef.current;
+
+        await streamQueuePromiseRef.current;
+        if (generation !== captureGeneration.current) return;
+
+        if (
+          unflushedSamplesCountRef.current >= MIN_TAIL_SAMPLES &&
+          unflushedChunksRef.current.length > 0
+        ) {
+          const tailChunks = unflushedChunksRef.current;
+          unflushedChunksRef.current = [];
+          unflushedSamplesCountRef.current = 0;
+          const tailSlice = concatFloat32Arrays(tailChunks);
+          enqueueStreamChunk(tailSlice, snapshot, generation);
+          await streamQueuePromiseRef.current;
+          if (generation !== captureGeneration.current) return;
+        }
+
+        const fullPcm = concatFloat32Arrays(capturedPcmChunks);
+        const fullTelemetry = computePcmTelemetry(fullPcm, 16000);
+        const isLongRecording = fullPcm.length > MAX_ANALYZE_WAV_SAMPLES;
+        const analysisPcm = isLongRecording
+          ? fullPcm.subarray(fullPcm.length - MAX_ANALYZE_WAV_SAMPLES)
+          : fullPcm;
+        const wavBlob = float32ToPcm16Wav(analysisPcm, 16000);
+
+        revokeActiveAudioUrl();
+        const playbackUrl =
+          isLongRecording && rawBlob.size > 0
+            ? URL.createObjectURL(rawBlob)
+            : URL.createObjectURL(wavBlob);
+        activeUrlRef.current = playbackUrl;
+        setRecordedAudioUrl(playbackUrl);
+        setRecordedWavBlob(wavBlob);
+
+        const recognizedText = streamedTextPartsRef.current
+          .join(snapshot.language === 'ja' ? '' : ' ')
+          .trim();
+        const activeRms = streamedMetricsRef.current.activeRmsValues;
+        const reportedRmsDb = !fullTelemetry.isSilent
+          ? fullTelemetry.rmsDb
+          : activeRms.length > 0
+          ? Number((activeRms.reduce((a, b) => a + b, 0) / activeRms.length).toFixed(1))
+          : fullTelemetry.rmsDb;
+        const isSilent =
+          fullTelemetry.isSilent && activeRms.length === 0 && recognizedText.length === 0;
+
+        const preview: TranscribePreviewResult = {
+          recognizedText,
+          isSilent,
+          durationSec: fullTelemetry.durationSec > 0 ? fullTelemetry.durationSec : durationFallback,
+          rmsDb: reportedRmsDb,
+          pauseCount: streamedMetricsRef.current.pauseCount,
+          silenceRatio: fullTelemetry.silenceRatio,
+          pitchContour:
+            streamedMetricsRef.current.pitchContour.length > 0
+              ? streamedMetricsRef.current.pitchContour
+              : undefined,
+          whisperError: streamedMetricsRef.current.whisperError || undefined,
+          chunkCount: streamedMetricsRef.current.chunkCount,
+        };
+
+        setPreviewResult(preview);
+        setTakeSnapshot(snapshot);
+        updateSessionState('ready');
+        return;
+      }
+
       const { wavBlob, durationSec, rmsDb } = await encodeWav16kMono(rawBlob);
       if (generation !== captureGeneration.current) return;
 
@@ -469,17 +702,18 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         pauseCount: Number(data.pauseCount ?? 0),
         silenceRatio: Number(data.silenceRatio ?? 0),
         pitchContour: Array.isArray(data.pitchContour) ? data.pitchContour : undefined,
+        whisperError: data.whisperError ? String(data.whisperError) : undefined,
       };
 
       setPreviewResult(preview);
       setTakeSnapshot(snapshot);
-      setSessionState('ready');
+      updateSessionState('ready');
     } catch (err: any) {
       if (generation !== captureGeneration.current) return;
       setFinalizeError(
         err?.message || 'Could not finalize or transcribe recorded audio.'
       );
-      setSessionState('ready');
+      updateSessionState('ready');
     }
   };
 
@@ -490,13 +724,14 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     onEvaluationError?.(null);
     setRecordingSec(0);
     recordingSecRef.current = 0;
+    resetStreamingState();
 
     const snapshot = explicitSnapshot || createSnapshot(effectiveSegments, mode);
     pendingSnapshotRef.current = snapshot;
     setTakeSnapshot(snapshot);
 
     const generation = ++captureGeneration.current;
-    setSessionState('permission');
+    updateSessionState('permission');
     audioChunksRef.current = [];
 
     try {
@@ -522,6 +757,42 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       analyser.fftSize = 256;
       source.connect(analyser);
       analyserRef.current = analyser;
+
+      if (
+        typeof audioCtx.createScriptProcessor === 'function' &&
+        typeof audioCtx.createGain === 'function'
+      ) {
+        const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        const silentGain = audioCtx.createGain();
+        silentGain.gain.value = 0;
+
+        processor.onaudioprocess = (event) => {
+          if (generation !== captureGeneration.current || sessionStateRef.current !== 'recording') {
+            return;
+          }
+          const rawChannel = event.inputBuffer.getChannelData(0);
+          const downsampled = downsampleTo16kMono(rawChannel, audioCtx.sampleRate);
+          if (downsampled.length === 0) return;
+
+          pcmChunksRef.current.push(downsampled);
+          unflushedChunksRef.current.push(downsampled);
+          unflushedSamplesCountRef.current += downsampled.length;
+
+          if (unflushedSamplesCountRef.current >= STREAM_CHUNK_SAMPLES) {
+            const toFlush = unflushedChunksRef.current;
+            unflushedChunksRef.current = [];
+            unflushedSamplesCountRef.current = 0;
+            const slice = concatFloat32Arrays(toFlush);
+            enqueueStreamChunk(slice, pendingSnapshotRef.current || snapshot, generation);
+          }
+        };
+
+        source.connect(processor);
+        processor.connect(silentGain);
+        silentGain.connect(audioCtx.destination);
+        scriptProcessorRef.current = processor;
+        silentGainRef.current = silentGain;
+      }
 
       const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
@@ -555,7 +826,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
 
       mediaRecorderRef.current = recorder;
       recorder.start(250);
-      setSessionState('recording');
+      updateSessionState('recording');
       startTimeMsRef.current = Date.now();
 
       timerIntervalRef.current = window.setInterval(() => {
@@ -568,7 +839,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     } catch (err: any) {
       if (generation !== captureGeneration.current) return false;
       stopAllCaptureResources();
-      setSessionState('idle');
+      updateSessionState('idle');
       onSetAutoPauseAtSec(null);
       setMicError(
         err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError'
@@ -592,7 +863,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       }
     }
     stopAllCaptureResources();
-    setSessionState('idle');
+    resetStreamingState();
+    updateSessionState('idle');
   };
 
   const handleStartSession = async () => {
@@ -628,7 +900,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         onSetAutoPauseAtSec(targetSeg.endTime);
         playerHandleRef.current.seekTo(targetSeg.startTime, true);
         playerHandleRef.current.play();
-        setSessionState('listening');
+        updateSessionState('listening');
       } else {
         await startMicrophoneCapture(snap);
       }
@@ -706,7 +978,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         window.clearInterval(timerIntervalRef.current);
         timerIntervalRef.current = null;
       }
-      setSessionState('paused');
+      updateSessionState('paused');
     } else if (sessionState === 'paused' && recorder.state === 'paused') {
       recorder.resume();
       if (mode === 'simultaneous') {
@@ -719,7 +991,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         recordingSecRef.current = elapsed;
         setRecordingSec(elapsed);
       }, 150);
-      setSessionState('recording');
+      updateSessionState('recording');
     }
   };
 
@@ -751,18 +1023,18 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       }
     }
 
-    setSessionState('finalizing');
+    updateSessionState('finalizing');
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     } else {
-      setSessionState('idle');
+      updateSessionState('idle');
     }
     stopAllCaptureResources();
   };
 
   const handleAnalyzeShadowing = async () => {
     if (!recordedWavBlob || !takeSnapshot || sessionState === 'analyzing') return;
-    setSessionState('analyzing');
+    updateSessionState('analyzing');
     onEvaluationError?.(null);
 
     try {
@@ -814,10 +1086,10 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         dataUrl || recordedAudioUrl || undefined
       );
 
-      setSessionState('reviewed');
+      updateSessionState('reviewed');
       onReportGenerated(report);
     } catch (err: any) {
-      setSessionState('ready');
+      updateSessionState('ready');
       onEvaluationError?.(
         err?.message || 'Failed to analyze shadowing performance.'
       );
@@ -830,7 +1102,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     setRecordedWavBlob(null);
     revokeActiveAudioUrl();
     setRecordedAudioUrl(null);
-    setSessionState('idle');
+    resetStreamingState();
+    updateSessionState('idle');
   };
 
   useEffect(() => {
@@ -859,7 +1132,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         ? words.filter((_, i) => i !== 2).join(' ')
         : snap.targetText;
 
-    setSessionState('analyzing');
+    updateSessionState('analyzing');
     onEvaluationError?.(null);
 
     try {
@@ -890,10 +1163,10 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         Number((snap.targetDurationSec * 1.05).toFixed(1))
       );
       report.isDemo = true;
-      setSessionState('reviewed');
+      updateSessionState('reviewed');
       onReportGenerated(report);
     } catch (err: any) {
-      setSessionState('idle');
+      updateSessionState('idle');
       onEvaluationError?.(err?.message || 'Demo assessment failed.');
     }
   };
@@ -1067,12 +1340,32 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           )}
 
           {(sessionState === 'recording' || sessionState === 'paused') && (
-            <canvas
-              ref={canvasRef}
-              width={520}
-              height={42}
-              className="w-full h-10 bg-slate-950/60 border border-sky-100 rounded-md"
-            />
+            <>
+              <canvas
+                ref={canvasRef}
+                width={520}
+                height={42}
+                className="w-full h-10 bg-slate-950/60 border border-sky-100 rounded-md"
+              />
+              {(mode === 'simultaneous' || liveRecognizedText || isStreamingChunk) && (
+                <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-md space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-sky-900">
+                      Live Whisper Recognition
+                    </span>
+                    {isStreamingChunk && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-100 text-sky-900 text-[11px] font-medium">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        <span>Transcribing chunk...</span>
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-700 leading-relaxed max-h-20 overflow-y-auto break-words">
+                    {liveRecognizedText || 'Listening for speech...'}
+                  </p>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -1291,7 +1584,10 @@ export const RecognizedSpeechPreview: React.FC<RecognizedSpeechPreviewProps> = (
             >
               <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
               <span>
-                No clear speech detected in recording — please check your microphone or record again.
+                {preview.whisperError || (!preview.isSilent && preview.rmsDb > -45) || !preview.isSilent
+                  ? preview.whisperError ||
+                    'Audio was recorded clearly, but local Whisper transcription returned empty text — you can still click Analyze Shadowing Result or Record Again.'
+                  : 'No clear speech detected in recording — please check your microphone or record again.'}
               </span>
             </div>
           ) : (

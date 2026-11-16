@@ -1147,3 +1147,56 @@ def test_pitch_contour_caps_frames_and_analyze_skips_whisper_and_forwards_window
     assert resp.status_code == 200
     assert whisper_calls == 0
     assert captured_window == [(12.5, 24.0)]
+
+
+def test_long_simultaneous_wav_with_long_pause_not_marked_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Long Simultaneous WAV with clear speech followed by long silence reports isSilent=False and valid rmsDb."""
+    import math
+    import wave
+    from array import array
+    import httpx
+    from adk_backend.tools import whisper_tools
+
+    sr = 16000
+    # 2 seconds of clear voiced speech (~160 Hz) followed by 38 seconds of silence -> silenceRatio ~0.95 > 0.94
+    speech_samples = [
+        int(12000 * math.sin(2.0 * math.pi * 160.0 * i / sr))
+        for i in range(sr * 2)
+    ]
+    silence_samples = [0] * (sr * 38)
+    combined = array("h", speech_samples + silence_samples)
+
+    wav_path = tmp_path / "long_simultaneous.wav"
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(combined.tobytes())
+
+    acoustics = whisper_tools.analyze_wav_acoustics(wav_path)
+    assert acoustics["isValidWav"] is True
+    assert acoustics["silenceRatio"] > 0.94
+    assert acoustics["voicedFrames"] >= 5
+    assert acoustics["isSilent"] is False
+    assert acoustics["rmsDb"] >= -46.0
+
+    # Also verify transcribe_audio_with_whisper formats ReadTimeout without empty string
+    class TimeoutClient:
+        def __init__(self, *args, **kwargs):
+            self.timeout = kwargs.get("timeout")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(whisper_tools.httpx, "AsyncClient", TimeoutClient)
+    err_res = asyncio.run(whisper_tools.transcribe_audio_with_whisper(wav_path, language="en"))
+    assert err_res["whisperOnline"] is False
+    assert err_res["error"] == "ReadTimeout"

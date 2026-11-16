@@ -261,6 +261,10 @@ rt {
   gap: 16px;
 }
 
+.echo-studio {
+  align-items: start;
+}
+
 .echo-settings {
   margin-top: 16px;
 }

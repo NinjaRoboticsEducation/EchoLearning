@@ -345,12 +345,18 @@ def analyze_wav_acoustics(wav_path: Path) -> dict[str, Any]:
         voiced_frames = pitch_info["voicedFrames"]
         peak_clip_ratio = round(clipped_count / max(1, len(samples)), 4)
 
-        is_silent = rms_db < -48.0 or silence_ratio > 0.94 or voiced_frames < 3
+        if voiced_frames >= 5 and len(active_rms_db) >= 6 and energy_db >= -46.0:
+            is_silent = False
+            reported_rms_db = round(max(rms_db, energy_db), 1)
+        else:
+            is_silent = rms_db < -48.0 or silence_ratio > 0.94 or voiced_frames < 3
+            reported_rms_db = round(rms_db, 1)
+
         return {
             "isSilent": is_silent,
             "isValidWav": True,
             "durationSec": duration_sec,
-            "rmsDb": round(rms_db, 1),
+            "rmsDb": reported_rms_db,
             "energyDb": energy_db,
             "energyDynamicRangeDb": energy_dynamic_range_db,
             "pauseCount": pause_count,
@@ -610,7 +616,7 @@ async def transcribe_audio_with_whisper(
 ) -> dict[str, Any]:
     """Transcribes a 16kHz mono WAV via local whisper-server and extracts word confidences."""
     try:
-        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
             with open(wav_path, "rb") as wf:
                 resp = await client.post(
                     f"{WHISPER_SERVER_URL}/v1/audio/transcriptions",
@@ -674,13 +680,14 @@ async def transcribe_audio_with_whisper(
             "whisperOnline": True,
         }
     except Exception as exc:
-        logger.warning("Whisper server call failed: %s", exc)
+        err_msg = f"{type(exc).__name__}: {exc}".strip(": ")
+        logger.warning("Whisper server call failed: %s", err_msg)
         return {
             "text": "",
             "words": [],
             "meanConfidence": None,
             "whisperOnline": False,
-            "error": str(exc),
+            "error": err_msg,
         }
 
 

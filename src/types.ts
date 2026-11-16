@@ -168,6 +168,8 @@ export interface TranscribePreviewResult {
   pauseCount: number;
   silenceRatio: number;
   pitchContour?: number[];
+  whisperError?: string;
+  chunkCount?: number;
 }
 
 export interface ShadowingAssessmentReport {

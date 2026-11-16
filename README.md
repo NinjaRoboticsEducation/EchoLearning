@@ -21,7 +21,7 @@
    - [1. Generate Transcripts Now & Practice Later](#1-generate-transcripts-now--practice-later)
    - [2. Inline Transcript Editing & Japanese Furigana](#2-inline-transcript-editing--japanese-furigana)
    - [3. Contextual AI Dictionary & Pitch Accent](#3-contextual-ai-dictionary--pitch-accent)
-   - [4. Recording Your Voice & Instant Whisper Speech Preview (S05)](#4-recording-your-voice--instant-whisper-speech-preview-s05)
+   - [4. Practice Studio: Shadowing Modes & Real-Time Streaming Whisper (S05)](#4-practice-studio-shadowing-modes--real-time-streaming-whisper-s05)
    - [5. AI Shadowing & Acoustic Prosody Evaluation (S06)](#5-ai-shadowing--acoustic-prosody-evaluation-s06)
 6. [🔌 Connecting AI Coding Tools via MCP (Claude Code, OpenAI Codex, Antigravity)](#-connecting-ai-coding-tools-via-mcp)
    - [What is MCP?](#what-is-mcp-in-plain-english)
@@ -108,8 +108,8 @@ flowchart TD
 
 1. **Caption & ASR Ingestion:** When you paste a YouTube link, EchoLearning downloads the authentic subtitle tracks. If no subtitles exist, it downloads audio using `yt-dlp` and runs local `whisper-server` to generate verbatim transcripts automatically.
 2. **Grammar & Furigana Tokenization:** Japanese text is tokenized into morphemes using `fugashi` (MeCab + UniDic). Every Kanji character receives accurate Hiragana Furigana (`<ruby>` annotations) and mora counts.
-3. **Studio Practice & Voice Capture:** In the Practice Studio, you practice sentence-by-sentence. When you click **Finish Recording**, the app converts your microphone audio into 16kHz Mono PCM WAV.
-4. **S05 Local Whisper Speech Preview:** Before you even submit for grading, the local Whisper model transcribes your take on-device in under a second so you can review what speech was detected.
+3. **Studio Practice & Voice Capture:** In the Practice Studio, choose between sentence-by-sentence **Listen-Then-Repeat** or continuous **Simultaneous Shadowing** (up to 60 minutes). During Simultaneous practice, microphone audio is captured at 16 kHz mono PCM and streamed to Whisper in background 10-second chunks.
+4. **S05 Streaming Whisper Speech Preview:** The local Whisper model (`large-v3-turbo`) decodes your speech in real time as you shadow, displaying live recognized text and finalizing your complete take in just 1–3 seconds when you click **Finish Recording** so you can review your words before running full acoustic grading.
 5. **Pragmatic Local Acoustic Analysis:** EchoLearning extracts fundamental pitch frequency ($F_0$), pauses ($\ge 350\text{ ms}$), speaking rate (WPM in English / Moras/min in Japanese), and volume dynamics.
 6. **ADK 2.x Coaching:** The Google ADK `ShadowingAgent` combines acoustic telemetry with local Qwen3.5 intelligence to deliver an encouraging, constructive evaluation in your preferred interface language.
 
@@ -396,16 +396,78 @@ Language is contextual—a word's meaning depends on the sentence it appears in.
 
 ---
 
-### 4. Recording Your Voice & Instant Whisper Speech Preview (S05)
+### 4. Practice Studio: Shadowing Modes & Real-Time Streaming Whisper (S05)
 
-When you are ready to shadow:
+When you are ready to practice in the **Practice Studio**, EchoLearning provides two distinct training modes designed to match your skill level and study goals:
 
-1. Select your shadowing mode:
-   - **Listen-Then-Repeat Mode:** The video plays one sentence, pauses automatically, and activates your microphone. Ideal for beginners focusing on phonetic precision.
-   - **Simultaneous Mode:** The video plays continuously while you speak along in real time with the speaker. Ideal for intermediate and advanced learners mastering cadence and rhythm.
-2. Speak into your microphone. You will see a live **60fps audio waveform** reflecting your volume.
-3. Click **Finish Recording**.
-4. **The S05 Speech Preview Card appears immediately!** Local `whisper-server` transcribes your recorded take in under a second. You can read exactly what the AI heard before requesting the full acoustic breakdown:
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              CHOOSE YOUR SHADOWING MODE                                │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│  🎯 Listen-Then-Repeat Mode   Video plays 1 sentence → pauses → you repeat & record.   │
+│                               Best for beginners focusing on phonetic precision.       │
+│                                                                                        │
+│  🌊 Simultaneous Shadowing    Video plays continuously up to 60 minutes uninterrupted. │
+│                               Microphone audio streams live in 10-second chunks.       │
+│                               Best for intermediate/advanced learners building rhythm. │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Mode 1: Listen-Then-Repeat Mode (Sentence-by-Sentence Precision)
+- **How it works:** The video plays a single sentence, pauses automatically at the end of the phrase, and starts recording your microphone.
+- **Why use it:** When studying fast-paced Japanese conversation, unfamiliar vocabulary, or complex English sentence structures, this mode allows you to absorb the native speaker's accent, pitch accent, and rhythm before repeating it.
+- **Instant Preview:** When you click **Finish Recording**, local `whisper-server` (`large-v3-turbo`) transcribes your take on-device in under a second.
+
+#### Mode 2: Continuous Simultaneous Shadowing (Up to 60 Minutes Continuous Practice)
+- **How it works:** The YouTube video plays continuously without interruption while you speak along in real time—trailing just a split second behind the speaker, exactly like a professional conference interpreter!
+- **Continuous Practice up to 60 Minutes (3,600 Seconds):** You are not restricted to short clips. Whether you want to shadow a 5-minute news summary, a 20-minute TED Talk, or an entire **60-minute (3,600-second)** podcast, documentary, or university lecture, EchoLearning supports continuous practice sessions with zero memory leaks or browser crashes. When you reach the 60-minute mark, the studio automatically wraps up and finalizes your session safely.
+- **Real-Time Streaming Whisper Recognition:** Traditional speech apps make you wait while a 20- or 30-minute audio file uploads and processes after you stop. EchoLearning does the heavy lifting **live while you speak**:
+  1. **Background 10-Second 16 kHz Mono WAV Chunking:** As you speak into your microphone, EchoLearning captures your audio at 16 kHz mono PCM in browser memory. Every 10 seconds of speech, it automatically slices a compact 10-second WAV chunk in the background.
+  2. **Streaming to Local Whisper Server:** Each 10-second chunk streams immediately to your local `whisper-server` (`large-v3-turbo` running on port `8081`).
+  3. **Live Recognized Text On Screen:** As each chunk is transcribed on your Mac, your words appear live on screen in the studio recording card! You can see your speech recognized in real time right below the target sentence.
+  4. **1–3 Second Near-Instant Finalization:** When you finally click **Finish Recording**, EchoLearning only needs to transcribe whatever short tail of audio remains (typically 1 to 2 seconds). Instead of waiting minutes for a long recording to process, your entire session finalizes in **just 1 to 3 seconds**!
+
+#### 🔄 Visual Workflow: Real-Time Streaming Whisper Recognition
+
+```mermaid
+flowchart TD
+    subgraph LIVE ["🎙️ Live Continuous Shadowing (Up to 60 Minutes)"]
+        MIC["🗣️ Microphone Input<br/>(Continuous Real-Time Voice)"] --> CAP["🎛️ Audio Worklet Capture<br/>(16 kHz Mono PCM Downsampler)"]
+        CAP --> BUF["📦 10-Second Audio Chunk Slices<br/>(160,000 samples @ 16 kHz WAV)"]
+    end
+
+    subgraph BG ["⚡ Background Streaming Pipeline"]
+        BUF --> QUEUE["🔄 Sequential Background Queue<br/>(Zero-Lag Non-Overloading Pipeline)"]
+        QUEUE --> WHISPER["🧠 Local whisper-server (:8081)<br/>(Whisper Large-v3-Turbo)"]
+    end
+
+    subgraph UI ["💻 Real-Time Studio Interface"]
+        WHISPER --> LIVE_TEXT["📝 Live Recognized Speech Stream<br/>(Appends text dynamically on screen)"]
+        STOP["⏹️ Click 'Finish Recording'<br/>(Processes only last remaining tail chunk)"] --> FAST["⚡ 1–3s Instant Finalization!<br/>(Ready to review or run acoustic evaluation)"]
+    end
+
+    classDef primary fill:#2563eb,stroke:#1d4ed8,color:#ffffff,stroke-width:2px;
+    classDef bg fill:#7c3aed,stroke:#6d28d9,color:#ffffff,stroke-width:2px;
+    classDef ui fill:#059669,stroke:#047857,color:#ffffff,stroke-width:2px;
+    class MIC,CAP,BUF primary;
+    class QUEUE,WHISPER bg;
+    class LIVE_TEXT,STOP,FAST ui;
+```
+
+#### Comparison: Listen-Then-Repeat vs. Simultaneous Shadowing
+
+| Feature | 🎯 Listen-Then-Repeat Mode | 🌊 Simultaneous Shadowing Mode |
+| :--- | :--- | :--- |
+| **Playback Style** | Sentence-by-sentence (auto-pauses after each line) | Continuous uninterrupted playback |
+| **Session Length** | Per-sentence clips (~5–30 seconds) | **Continuous long-form up to 60 minutes (3,600s)** |
+| **Recognition Timing** | Sub-second preview upon clicking Finish Recording | **Real-time 10-second chunk streaming while speaking** |
+| **Finalization Time** | < 1 second | **1–3 seconds** (processes only final remaining tail chunk) |
+| **Live Visual Text** | Displays target sentence + live 60fps volume meter | Displays live accumulating recognized text stream on screen |
+| **Best Learning Stage** | Beginners, pronunciation drill, difficult intonation | Intermediate/advanced fluency, cadence, speed, and stamina |
+
+#### Instant S05 Speech Preview Card
+
+Once your recording finishes (whether in Listen-Then-Repeat or Simultaneous mode), the **S05 Speech Preview Card** gives you immediate feedback:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -413,14 +475,15 @@ When you are ready to shadow:
 ├────────────────────────────────────────────────────────────────────────┤
 │ Target:     "The only way to do great work is to love what you do."    │
 │ You Spoke:  "The only way to do great work is to love what you do."    │
+│ Mode:       Simultaneous Shadowing · Duration: 04:15 · Status: Ready   │
 │                                                                        │
 │ [ 🔊 Listen to My Recording ]               [ 📊 Analyze Shadowing Result ]│
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 > [!NOTE]
-> **No Cloud Audio Transfer:**  
-> Unlike other language apps that stream your microphone audio to browser cloud speech APIs, EchoLearning's speech preview runs **100% locally** via `whisper-server`. Your voice never leaves your Mac.
+> **100% On-Device Privacy & Zero Cloud Costs:**  
+> Both Listen-Then-Repeat and 60-minute Simultaneous Streaming operate entirely on your Mac. Microphone audio is processed in RAM and streamed directly to `http://127.0.0.1:8081`. No audio data, voice snippets, or speech transcripts are ever transmitted over the internet or uploaded to commercial cloud APIs.
 
 ---
 

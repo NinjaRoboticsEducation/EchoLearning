@@ -8,6 +8,170 @@ export interface EncodedWavResult {
   rmsDb: number;
 }
 
+export interface PcmTelemetry {
+  durationSec: number;
+  rmsDb: number;
+  isSilent: boolean;
+  silenceRatio: number;
+}
+
+/**
+ * Downsamples a mono Float32Array from inputSampleRate to 16 kHz mono using
+ * boxcar averaging (or linear interpolation when upsampling).
+ */
+export function downsampleTo16kMono(input: Float32Array, inputSampleRate: number): Float32Array {
+  const targetRate = 16000;
+  if (input.length === 0) {
+    return new Float32Array(0);
+  }
+  if (!Number.isFinite(inputSampleRate) || inputSampleRate <= 0 || inputSampleRate === targetRate) {
+    return new Float32Array(input);
+  }
+
+  const ratio = inputSampleRate / targetRate;
+  const outputLength = Math.max(1, Math.floor(input.length / ratio));
+  const output = new Float32Array(outputLength);
+
+  if (ratio > 1) {
+    for (let i = 0; i < outputLength; i += 1) {
+      const start = Math.floor(i * ratio);
+      const end = Math.min(input.length, Math.floor((i + 1) * ratio));
+      if (end > start) {
+        let sum = 0;
+        for (let j = start; j < end; j += 1) {
+          sum += input[j];
+        }
+        output[i] = sum / (end - start);
+      } else {
+        const pos = Math.min(input.length - 1, i * ratio);
+        const lo = Math.floor(pos);
+        const hi = Math.min(input.length - 1, lo + 1);
+        const frac = pos - lo;
+        output[i] = input[lo] * (1 - frac) + input[hi] * frac;
+      }
+    }
+    return output;
+  }
+
+  // Linear interpolation if inputSampleRate < 16000
+  for (let i = 0; i < outputLength; i += 1) {
+    const pos = Math.min(input.length - 1, i * ratio);
+    const lo = Math.floor(pos);
+    const hi = Math.min(input.length - 1, lo + 1);
+    const frac = pos - lo;
+    output[i] = input[lo] * (1 - frac) + input[hi] * frac;
+  }
+  return output;
+}
+
+/**
+ * Concatenates Float32Array chunks into a single Float32Array, optionally
+ * retaining only the most recent maxSamples samples.
+ */
+export function concatFloat32Arrays(chunks: Float32Array[], maxSamples?: number): Float32Array {
+  let totalLength = 0;
+  for (let i = 0; i < chunks.length; i += 1) {
+    totalLength += chunks[i].length;
+  }
+  if (totalLength === 0) {
+    return new Float32Array(0);
+  }
+
+  if (maxSamples !== undefined && maxSamples >= 0 && totalLength > maxSamples) {
+    if (maxSamples === 0) {
+      return new Float32Array(0);
+    }
+    const result = new Float32Array(maxSamples);
+    let skip = totalLength - maxSamples;
+    let offset = 0;
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i];
+      if (skip >= chunk.length) {
+        skip -= chunk.length;
+        continue;
+      }
+      const slice = skip > 0 ? chunk.subarray(skip) : chunk;
+      skip = 0;
+      result.set(slice, offset);
+      offset += slice.length;
+    }
+    return result;
+  }
+
+  const result = new Float32Array(totalLength);
+  let offset = 0;
+  for (let i = 0; i < chunks.length; i += 1) {
+    result.set(chunks[i], offset);
+    offset += chunks[i].length;
+  }
+  return result;
+}
+
+/**
+ * Computes 50ms windowed RMS telemetry on 16 kHz mono PCM samples.
+ * When >= 4 active speech windows (windowRms >= 0.012) are present, uses
+ * active-window RMS for rmsDb so long pauses in Simultaneous mode do not
+ * dilute the speaker's dB level, and marks isSilent = false.
+ */
+export function computePcmTelemetry(samples: Float32Array, sampleRate = 16000): PcmTelemetry {
+  if (samples.length === 0 || sampleRate <= 0) {
+    return {
+      durationSec: 0,
+      rmsDb: -120,
+      isSilent: true,
+      silenceRatio: 1,
+    };
+  }
+
+  const windowSize = Math.max(1, Math.floor(sampleRate * 0.05));
+  const activeThreshold = 0.012;
+  let windowCount = 0;
+  let activeWindows = 0;
+  let totalWindowRmsSq = 0;
+  let activeWindowRmsSq = 0;
+
+  for (let i = 0; i < samples.length; i += windowSize) {
+    const end = Math.min(samples.length, i + windowSize);
+    const len = end - i;
+    let sumSq = 0;
+    for (let j = i; j < end; j += 1) {
+      sumSq += samples[j] * samples[j];
+    }
+    const windowRms = Math.sqrt(sumSq / len);
+    const windowRmsSq = windowRms * windowRms;
+    totalWindowRmsSq += windowRmsSq;
+    windowCount += 1;
+
+    if (windowRms >= activeThreshold) {
+      activeWindows += 1;
+      activeWindowRmsSq += windowRmsSq;
+    }
+  }
+
+  const overallRms = Math.sqrt(totalWindowRmsSq / Math.max(1, windowCount));
+  const silenceRatio = Number(((windowCount - activeWindows) / Math.max(1, windowCount)).toFixed(2));
+  const durationSec = Number((samples.length / sampleRate).toFixed(2));
+
+  if (activeWindows >= 4) {
+    const activeRms = Math.sqrt(activeWindowRmsSq / activeWindows);
+    const rmsDb = Number((20 * Math.log10(Math.max(1e-6, activeRms))).toFixed(1));
+    return {
+      durationSec,
+      rmsDb,
+      isSilent: false,
+      silenceRatio,
+    };
+  }
+
+  const rmsDb = Number((20 * Math.log10(Math.max(1e-6, overallRms))).toFixed(1));
+  return {
+    durationSec,
+    rmsDb,
+    isSilent: rmsDb < -48.0 || activeWindows < 2,
+    silenceRatio,
+  };
+}
+
 function writeAscii(view: DataView, offset: number, text: string): void {
   for (let i = 0; i < text.length; i += 1) {
     view.setUint8(offset + i, text.charCodeAt(i));
