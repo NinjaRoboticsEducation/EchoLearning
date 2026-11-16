@@ -108,8 +108,8 @@ flowchart TD
 
 1. **Caption & ASR Ingestion:** When you paste a YouTube link, EchoLearning downloads the authentic subtitle tracks. If no subtitles exist, it downloads audio using `yt-dlp` and runs local `whisper-server` to generate verbatim transcripts automatically.
 2. **Grammar & Furigana Tokenization:** Japanese text is tokenized into morphemes using `fugashi` (MeCab + UniDic). Every Kanji character receives accurate Hiragana Furigana (`<ruby>` annotations) and mora counts.
-3. **Studio Practice & Voice Capture:** In the Practice Studio, choose between sentence-by-sentence **Listen-Then-Repeat** or continuous **Simultaneous Shadowing** (up to 60 minutes). During Simultaneous practice, microphone audio is captured at 16 kHz mono PCM and streamed to Whisper in background 10-second chunks.
-4. **S05 Streaming Whisper Speech Preview:** The local Whisper model (`large-v3-turbo`) decodes your speech in real time as you shadow, displaying live recognized text and finalizing your complete take in just 1–3 seconds when you click **Finish Recording** so you can review your words before running full acoustic grading.
+3. **Studio Practice & Voice Capture:** In the Practice Studio, choose between sentence-by-sentence **Listen-Then-Repeat** or continuous **Simultaneous Shadowing** (up to 60 minutes). During Simultaneous practice, microphone audio is captured at 16 kHz mono PCM and streamed to Whisper in adaptive 5–14s background chunks.
+4. **S05 Streaming Whisper Speech Preview:** The **AI Recognized Speech** panel appears immediately as soon as you start recording and displays your recognized speech incrementally and simultaneously in real time. Powered by local `whisper-server` (`large-v3-turbo` with `--best-of 1 --beam-size 1 --no-fallback --audio-ctx 768` for 3x faster CPU inference), your complete transcript is already visible upon clicking **Finish Recording** (requiring at most a brief 1–3s tail flush), with **Play Recorded Audio** reproducing 100% of your take from `0:00` to the end.
 5. **Pragmatic Local Acoustic Analysis:** EchoLearning extracts fundamental pitch frequency ($F_0$), pauses ($\ge 350\text{ ms}$), speaking rate (WPM in English / Moras/min in Japanese), and volume dynamics.
 6. **ADK 2.x Coaching:** The Google ADK `ShadowingAgent` combines acoustic telemetry with local Qwen3.5 intelligence to deliver an encouraging, constructive evaluation in your preferred interface language.
 
@@ -293,9 +293,13 @@ cd EchoLearning
 ```
 *`start_all.sh` (which invokes `./scripts/start.sh`) launches all four coordinated background services:*
 - 🧠 **`llama-server`** (:8080) — Local Qwen3.5 LLM engine with Apple Metal GPU offload or AVX2 CPU acceleration.
-- 🎙️ **`whisper-server`** (:8081) — Local Whisper Large-v3-Turbo speech recognition engine.
-- 🚀 **FastAPI + Google ADK Backend** (:3000) — Studio REST API, SQLite persistence, and Streamable HTTP MCP endpoint.
-- ⚡ **Vite Dev Server** (:5173) — Interactive React 19 UI with hot-module reloading (opens automatically in your browser).
+- 🎙️ **`whisper-server`** (:8081) — Local Whisper Large-v3-Turbo speech recognition engine configured with `--best-of 1 --beam-size 1 --no-fallback --audio-ctx 768` for 3x faster CPU inference.
+- 🚀 **`uvicorn` (FastAPI + Google ADK Backend)** (:3000) — Studio REST API, SQLite persistence, and Streamable HTTP MCP endpoint.
+- ⚡ **`vite` Dev Server** (:5173) — Interactive React 19 UI with hot-module reloading (opens automatically in your browser).
+
+> [!TIP]
+> **Automatic Pre-Launch Stale Process & Port Cleanup:**  
+> Before launching services, `./scripts/start_all.sh` automatically cleans up any stale `.pids/*.pid` files and orphaned EchoLearning port listeners on `8080`, `8081`, `3000`, or `5173`. You never need to hunt down or manually kill rogue background processes from previous sessions!
 
 #### Step 4: Open in Your Browser
 If your browser does not open automatically, navigate to either:
@@ -324,11 +328,16 @@ To launch EchoLearning with a single click without opening Terminal:
 ### 🛑 Clean Shutdown
 
 You do not need to hunt down process IDs or force-close terminal windows:
-1. Click the **Shut down** button in the top-right header of the web app.
+1. Click the **SHUT DOWN** button in the top navigation bar of the web app.
 2. Confirm the prompt in the dialog.
-3. EchoLearning cleanly terminates `llama-server`, `whisper-server`, and the backend, freeing all RAM and GPU resources.
+3. EchoLearning writes `.pids/shutdown.requested` and cleanly terminates all 4 managed services:
+   - 🧠 **`llama-server`** (port `8080`)
+   - 🎙️ **`whisper-server`** (port `8081`)
+   - 🚀 **`uvicorn`** FastAPI backend (port `3000`)
+   - ⚡ **`vite`** frontend server (port `5173`)
+   All ports are released without leaving orphaned background listeners, cleanly freeing 100% of RAM and GPU resources.
 
-Alternatively, you can run `./scripts/stop.sh` from the project directory.
+Alternatively, you can run `./scripts/stop.sh` from the project directory in Terminal. Running `./scripts/stop.sh` writes `.pids/shutdown.requested`, terminates the launcher and all 4 child services, verifies that ports `8080`, `8081`, `3000`, and `5173` are freed, and removes `.pids/*.pid` and lock files cleanly.
 
 ---
 
@@ -422,28 +431,30 @@ When you are ready to practice in the **Practice Studio**, EchoLearning provides
 - **How it works:** The YouTube video plays continuously without interruption while you speak along in real time—trailing just a split second behind the speaker, exactly like a professional conference interpreter!
 - **Continuous Practice up to 60 Minutes (3,600 Seconds):** You are not restricted to short clips. Whether you want to shadow a 5-minute news summary, a 20-minute TED Talk, or an entire **60-minute (3,600-second)** podcast, documentary, or university lecture, EchoLearning supports continuous practice sessions with zero memory leaks or browser crashes. When you reach the 60-minute mark, the studio automatically wraps up and finalizes your session safely.
 - **Real-Time Streaming Whisper Recognition:** Traditional speech apps make you wait while a 20- or 30-minute audio file uploads and processes after you stop. EchoLearning does the heavy lifting **live while you speak**:
-  1. **Background 10-Second 16 kHz Mono WAV Chunking:** As you speak into your microphone, EchoLearning captures your audio at 16 kHz mono PCM in browser memory. Every 10 seconds of speech, it automatically slices a compact 10-second WAV chunk in the background.
-  2. **Streaming to Local Whisper Server:** Each 10-second chunk streams immediately to your local `whisper-server` (`large-v3-turbo` running on port `8081`).
-  3. **Live Recognized Text On Screen:** As each chunk is transcribed on your Mac, your words appear live on screen in the studio recording card! You can see your speech recognized in real time right below the target sentence.
-  4. **1–3 Second Near-Instant Finalization:** When you finally click **Finish Recording**, EchoLearning only needs to transcribe whatever short tail of audio remains (typically 1 to 2 seconds). Instead of waiting minutes for a long recording to process, your entire session finalizes in **just 1 to 3 seconds**!
+  1. **Immediate Panel Activation:** The **AI Recognized Speech** panel appears immediately as soon as you start recording. You never have to wait until recording finishes to know whether your microphone is active and picking up your voice.
+  2. **Incremental & Simultaneous Live Recognition:** The panel displays your recognized speech **incrementally and simultaneously** in real time. It combines instant live speech recognition with adaptive 5–14s background audio chunks captured at 16 kHz mono PCM in browser memory.
+  3. **3x Faster CPU Inference:** Background chunks stream to your local `whisper-server` (`large-v3-turbo` running on port `8081`), which is configured with `--best-of 1 --beam-size 1 --no-fallback --audio-ctx 768` for **3x faster CPU inference**. Text is transcribed with minimal CPU footprint, appending smoothly without lagging playback.
+  4. **Complete Transcription on Finish Recording:** When you click **Finish Recording**, the complete transcription is already visible in the **AI Recognized Speech** panel (requiring at most a brief 1–3s tail flush for the final remaining audio snippet).
+  5. **100% Full Audio Playback (`0:00` to End):** Clicking **Play Recorded Audio** reproduces **100% of your entire shadowing recording from `0:00` to the end**, giving you full fidelity playback of your practice session before running acoustic grading.
 
 #### 🔄 Visual Workflow: Real-Time Streaming Whisper Recognition
 
 ```mermaid
 flowchart TD
     subgraph LIVE ["🎙️ Live Continuous Shadowing (Up to 60 Minutes)"]
-        MIC["🗣️ Microphone Input<br/>(Continuous Real-Time Voice)"] --> CAP["🎛️ Audio Worklet Capture<br/>(16 kHz Mono PCM Downsampler)"]
-        CAP --> BUF["📦 10-Second Audio Chunk Slices<br/>(160,000 samples @ 16 kHz WAV)"]
+        MIC["🗣️ Microphone Input<br/>(16 kHz Mono PCM Voice)"] --> CAP["🎛️ Audio Worklet Capture &<br/>Instant Live Recognition"]
+        CAP --> BUF["📦 Adaptive Audio Chunks<br/>(5–14s Chunks @ 16 kHz Mono WAV)"]
     end
 
-    subgraph BG ["⚡ Background Streaming Pipeline"]
+    subgraph BG ["⚡ Background Streaming Pipeline (3x Faster CPU Inference)"]
         BUF --> QUEUE["🔄 Sequential Background Queue<br/>(Zero-Lag Non-Overloading Pipeline)"]
-        QUEUE --> WHISPER["🧠 Local whisper-server (:8081)<br/>(Whisper Large-v3-Turbo)"]
+        QUEUE --> WHISPER["🧠 Local whisper-server (:8081)<br/>(Whisper Large-v3-Turbo<br/><code>--best-of 1 --beam-size 1<br/>--no-fallback --audio-ctx 768</code>)"]
     end
 
-    subgraph UI ["💻 Real-Time Studio Interface"]
-        WHISPER --> LIVE_TEXT["📝 Live Recognized Speech Stream<br/>(Appends text dynamically on screen)"]
-        STOP["⏹️ Click 'Finish Recording'<br/>(Processes only last remaining tail chunk)"] --> FAST["⚡ 1–3s Instant Finalization!<br/>(Ready to review or run acoustic evaluation)"]
+    subgraph UI ["💻 Immediate AI Recognized Speech Panel"]
+        CAP -. "Instant Live Speech" .-> LIVE_TEXT["📝 AI Recognized Speech Panel<br/>(Appears immediately; incremental & simultaneous display)"]
+        WHISPER --> LIVE_TEXT
+        STOP["⏹️ Click 'Finish Recording'<br/>(Brief 1–3s tail flush)"] --> FAST["⚡ Complete Transcript Ready!<br/>• Full take visible immediately<br/>• 'Play Recorded Audio' (100% from 0:00 to end)<br/>• 'Analyze Shadowing Result' ready"]
     end
 
     classDef primary fill:#2563eb,stroke:#1d4ed8,color:#ffffff,stroke-width:2px;
@@ -460,26 +471,36 @@ flowchart TD
 | :--- | :--- | :--- |
 | **Playback Style** | Sentence-by-sentence (auto-pauses after each line) | Continuous uninterrupted playback |
 | **Session Length** | Per-sentence clips (~5–30 seconds) | **Continuous long-form up to 60 minutes (3,600s)** |
-| **Recognition Timing** | Sub-second preview upon clicking Finish Recording | **Real-time 10-second chunk streaming while speaking** |
-| **Finalization Time** | < 1 second | **1–3 seconds** (processes only final remaining tail chunk) |
-| **Live Visual Text** | Displays target sentence + live 60fps volume meter | Displays live accumulating recognized text stream on screen |
+| **AI Recognized Speech Panel** | Appears immediately upon recording; finalizes in < 1s | **Appears immediately upon recording; live incremental display** |
+| **Recognition Pipeline** | Instant on-device Whisper transcription | **Instant live recognition + adaptive 5–14s Whisper chunks (3x faster CPU inference)** |
+| **Finalization Time** | < 1 second | **Near-instant (1–3s brief tail flush)** |
+| **Recorded Audio Playback** | Complete sentence take | **100% entire recording from `0:00` to the end** |
+| **Live Visual Feedback** | Displays target sentence + live 60fps volume meter | Displays live accumulating recognized speech in AI panel simultaneously |
 | **Best Learning Stage** | Beginners, pronunciation drill, difficult intonation | Intermediate/advanced fluency, cadence, speed, and stamina |
 
-#### Instant S05 Speech Preview Card
+#### Immediate AI Recognized Speech Panel (S05 Speech Preview)
 
-Once your recording finishes (whether in Listen-Then-Repeat or Simultaneous mode), the **S05 Speech Preview Card** gives you immediate feedback:
+The **AI Recognized Speech** panel provides continuous visual clarity both during and after your recording:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
-│ ⚡ AI Recognized Speech (Local Whisper Speech Preview)                  │
+│ ⚡ AI Recognized Speech:                          [ Live Streaming · 14.2s ]│
 ├────────────────────────────────────────────────────────────────────────┤
 │ Target:     "The only way to do great work is to love what you do."    │
-│ You Spoke:  "The only way to do great work is to love what you do."    │
-│ Mode:       Simultaneous Shadowing · Duration: 04:15 · Status: Ready   │
+│ You Spoke:  "The only way to do great work is to love what you do..."  │
+│ Status:     Incremental live transcription stream (3x faster CPU Whisper)│
 │                                                                        │
-│ [ 🔊 Listen to My Recording ]               [ 📊 Analyze Shadowing Result ]│
+│ [ ⏹️ Finish Recording ]                                                 │
+├────────────────────────────────────────────────────────────────────────┤
+│ After Finishing:                                                       │
+│ [ 📊 Analyze Shadowing Result ]   [ 🔊 Play Recorded Audio (0:00-End) ]│
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+- **During Live Recording:** The panel appears as soon as recording starts, displaying a live pulsing streaming badge (`Live Streaming · X.Xs` or `Transcribing chunk...`) and accumulating your words dynamically in real time.
+- **Upon Clicking "Finish Recording":** Because speech recognition has already processed the recording in the background, your complete transcription is already visible on screen (requiring at most a brief 1–3s tail flush for the final audio chunk).
+- **Play Recorded Audio:** Click **Play Recorded Audio** to listen to **100% of your entire shadowing recording from `0:00` to the end** with the built-in HTML5 player.
+- **Analyze Shadowing Result:** Click **Analyze Shadowing Result** whenever you are ready to generate your comprehensive S06 acoustic prosody report!
 
 > [!NOTE]
 > **100% On-Device Privacy & Zero Cloud Costs:**  
@@ -1002,16 +1023,20 @@ Expected output:
 
 ---
 
-### 2. How do I fix "Port 3000, 8080, or 8081 already in use"?
+### 2. How do I fix "Port 3000, 8080, 8081, or 5173 already in use"?
 If an earlier session did not exit cleanly:
 ```bash
 ./scripts/stop.sh
 ```
-If a port remains occupied, check which process is holding it:
+Clicking **SHUT DOWN** in the top navigation bar of the web app (or running `./scripts/stop.sh` in Terminal) writes `.pids/shutdown.requested` and cleanly terminates all 4 managed services (`llama-server`, `whisper-server`, `uvicorn`, and `vite`) without leaving orphaned port listeners on `8080`, `8081`, `3000`, or `5173`.
+
+Furthermore, `./scripts/start_all.sh` automatically cleans up any stale `.pids/*.pid` files or orphaned EchoLearning port listeners before starting, ensuring you do not have to manually clear ports before launching.
+
+If a non-EchoLearning external application is occupying one of these ports, check which process is holding it:
 ```bash
-lsof -i :3000 -i :8080 -i :8081
+lsof -i :3000 -i :8080 -i :8081 -i :5173
 ```
-And terminate the specific stale process, or restart your Mac.
+And terminate that external process, or adjust its configuration.
 
 ---
 

@@ -626,6 +626,7 @@ async def transcribe_audio_with_whisper(
                         "language": language,
                         "response_format": "verbose_json",
                         "temperature": "0.0",
+                        "temperature_inc": "0.0",
                     },
                 )
         if resp.status_code != 200:

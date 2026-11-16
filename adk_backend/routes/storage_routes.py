@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import mimetypes
 import os
@@ -15,6 +16,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
@@ -435,29 +437,41 @@ async def build_system_status() -> dict[str, Any]:
 
 def _schedule_shutdown_exit() -> None:
     """Terminates child services and schedules process shutdown."""
-    _stop_pid_file(PIDS_DIR / "llama.pid", "llama-server")
-    _stop_pid_file(PIDS_DIR / "whisper.pid", "whisper-server")
-    owner_file = PIDS_DIR / "launcher.lock" / "owner"
-    if owner_file.is_file():
-        try:
-            lines = owner_file.read_text(encoding="utf-8").splitlines()
-            if lines:
-                pid = int(lines[0])
-                cmd = subprocess.check_output(
-                    ["ps", "-ww", "-p", str(pid), "-o", "command="],
-                    text=True,
-                ).strip()
-                if "scripts/start.sh" in cmd:
-                    os.kill(pid, signal.SIGTERM)
-        except Exception:
-            pass
+    try:
+        PIDS_DIR.mkdir(parents=True, exist_ok=True)
+        (PIDS_DIR / "shutdown.requested").write_text("1\n", encoding="utf-8")
+    except OSError:
+        pass
+
+    def _stop_services_and_launcher() -> None:
+        _stop_pid_file(PIDS_DIR / "llama.pid", "llama-server")
+        _stop_pid_file(PIDS_DIR / "whisper.pid", "whisper-server")
+        _stop_pid_file(PIDS_DIR / "frontend.pid", "vite")
+        owner_file = PIDS_DIR / "launcher.lock" / "owner"
+        if owner_file.is_file():
+            try:
+                lines = owner_file.read_text(encoding="utf-8").splitlines()
+                if lines:
+                    pid = int(lines[0])
+                    cmd = subprocess.check_output(
+                        ["ps", "-ww", "-p", str(pid), "-o", "command="],
+                        text=True,
+                    ).strip()
+                    if "scripts/start.sh" in cmd:
+                        os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
 
     if not os.getenv("PYTEST_CURRENT_TEST"):
         def _exit_soon() -> None:
-            time.sleep(0.25)
+            # Allow HTTP 200 OK to flush through Vite (:5173) to the browser first
+            time.sleep(0.35)
+            _stop_services_and_launcher()
             os.kill(os.getpid(), signal.SIGTERM)
 
         threading.Thread(target=_exit_soon, daemon=True).start()
+    else:
+        _stop_services_and_launcher()
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +695,31 @@ async def api_update_system_settings(req: SystemSettingsPatch):
     return await build_system_status()
 
 
+def _is_allowed_shutdown_origin(origin: str, request_host_header: str) -> bool:
+    if not origin:
+        return True
+    parsed = urlparse(origin)
+    origin_host = (parsed.hostname or "").strip().lower()
+    if origin_host in {"127.0.0.1", "localhost", "::1"} or any(
+        h in origin for h in ("127.0.0.1", "localhost", "[::1]")
+    ):
+        return True
+    if not db.get_settings().get("tailscale_enabled", True):
+        return False
+    if origin_host.endswith(".ts.net"):
+        return True
+    try:
+        ip = ipaddress.ip_address(origin_host)
+        if ip in ipaddress.ip_network("100.64.0.0/10"):
+            return True
+    except ValueError:
+        pass
+    req_host = request_host_header.split(":", 1)[0].strip().lower()
+    if req_host and origin_host and req_host == origin_host and req_host not in {"testserver"}:
+        return True
+    return False
+
+
 @router.post("/system/shutdown")
 async def api_system_shutdown(request: Request, background_tasks: BackgroundTasks):
     client_host = request.client.host if request.client else "127.0.0.1"
@@ -689,8 +728,14 @@ async def api_system_shutdown(request: Request, background_tasks: BackgroundTask
         raise HTTPException(status_code=403, detail="Shutdown is restricted to local requests.")
 
     origin = request.headers.get("origin", "")
-    if origin and not any(h in origin for h in ("127.0.0.1", "localhost", "[::1]")):
+    if origin and not _is_allowed_shutdown_origin(origin, request.headers.get("host", "")):
         raise HTTPException(status_code=403, detail="Cross-origin shutdown request rejected.")
+
+    try:
+        PIDS_DIR.mkdir(parents=True, exist_ok=True)
+        (PIDS_DIR / "shutdown.requested").write_text("1\n", encoding="utf-8")
+    except OSError:
+        pass
 
     background_tasks.add_task(_schedule_shutdown_exit)
     return {"status": "shutting_down"}

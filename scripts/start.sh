@@ -25,6 +25,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
     mkdir "$LOCK"
   fi
 fi
+rm -f "$PIDS_DIR/shutdown.requested"
 
 children=()
 service_names=()
@@ -33,13 +34,18 @@ service_pidfiles=()
 
 cleanup() {
   status=$?
-  trap - EXIT INT TERM
+  trap '' INT TERM
+  trap - EXIT
+
+  local tracked_pids=()
+  local pid
   for pid in "${children[@]}"; do
-    if jobs -pr | grep -Fxq "$pid" || kill -0 "$pid" 2>/dev/null; then
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && (jobs -pr | grep -Fxq "$pid" || kill -0 "$pid" 2>/dev/null); then
+      tracked_pids+=("$pid")
       kill -TERM "$pid" 2>/dev/null || true
     fi
-    wait "$pid" 2>/dev/null || true
   done
+
   local i
   for i in "${!service_pidfiles[@]}"; do
     local pf="${service_pidfiles[$i]}"
@@ -51,13 +57,43 @@ cleanup() {
         local cmd
         cmd="$(ps -ww -p "$fpid" -o command= 2>/dev/null || true)"
         if [[ "$name" != "llama-server" || "$cmd" == *llama-server* || "$cmd" == *start_llama.sh* ]]; then
+          tracked_pids+=("$fpid")
           kill -TERM "$fpid" 2>/dev/null || true
         fi
       fi
-      rm -f "$pf"
     fi
   done
-  rm -f "$LOCK/owner"
+
+  local _
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    local any_alive=false
+    for pid in "${tracked_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        any_alive=true
+        break
+      fi
+    done
+    if [[ "$any_alive" = false ]]; then
+      break
+    fi
+    sleep 0.13
+  done
+
+  for pid in "${tracked_pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+
+  for pid in "${children[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+
+  local pf
+  for pf in "${service_pidfiles[@]}"; do
+    rm -f "$pf"
+  done
+  rm -f "$PIDS_DIR/shutdown.requested" "$LOCK/owner"
   rmdir "$LOCK" 2>/dev/null || true
   exit "$status"
 }
@@ -66,7 +102,46 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 printf '%s\n%s\n' "$$" "$(ps -p "$$" -o lstart=)" > "$LOCK/owner"
 
+# Auto-clean stale EchoLearning PIDs before port checks
+for stale_pf in "$PIDS_DIR/llama.pid" "$PIDS_DIR/whisper.pid" "$PIDS_DIR/backend.pid" "$PIDS_DIR/frontend.pid"; do
+  if [[ -f "$stale_pf" ]]; then
+    stale_pid="$(head -n 1 "$stale_pf" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$stale_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$stale_pid" 2>/dev/null; then
+      stale_cmd="$(ps -ww -p "$stale_pid" -o command= 2>/dev/null || true)"
+      if [[ "$stale_cmd" == *llama-server* || "$stale_cmd" == *whisper-server* || "$stale_cmd" == *uvicorn* || "$stale_cmd" == *vite* ]]; then
+        echo "Cleaning up stale EchoLearning process (PID $stale_pid from $(basename "$stale_pf"))..."
+        kill -TERM "$stale_pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+          kill -0 "$stale_pid" 2>/dev/null || break
+          sleep 0.1
+        done
+        if kill -0 "$stale_pid" 2>/dev/null; then
+          kill -KILL "$stale_pid" 2>/dev/null || true
+        fi
+      fi
+    fi
+    rm -f "$stale_pf"
+  fi
+done
+
 for port in 8080 8081 3000 5173; do
+  lpids="$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -n "$lpids" ]]; then
+    for lpid in $lpids; do
+      lcmd="$(ps -ww -p "$lpid" -o command= 2>/dev/null || true)"
+      if [[ "$lcmd" == *"$PROJECT_ROOT"* || "$lcmd" == *adk_backend.main:app* || "$lcmd" == *llama-server* || "$lcmd" == *whisper-server* ]]; then
+        echo "Stopping orphaned EchoLearning process on port $port (PID $lpid)..."
+        kill -TERM "$lpid" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+          kill -0 "$lpid" 2>/dev/null || break
+          sleep 0.1
+        done
+        if kill -0 "$lpid" 2>/dev/null; then
+          kill -KILL "$lpid" 2>/dev/null || true
+        fi
+      fi
+    done
+  fi
   if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "Port $port is already in use. Stop the other instance or service first." >&2
     exit 1
@@ -135,6 +210,10 @@ check_children() {
         children[$i]="$new_pid"
         continue
       fi
+    fi
+    if [[ -f "$PIDS_DIR/shutdown.requested" ]]; then
+      echo "🛑 Shutting down EchoLearning services..."
+      exit 0
     fi
     local logfile="${service_logs[$i]}"
     echo "❌ Managed service '$name' (PID $pid) stopped unexpectedly." >&2

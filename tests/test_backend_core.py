@@ -532,7 +532,14 @@ def test_models_listing_and_activation(client: TestClient, isolated_env):
     assert manifest["active_model"] == "qwen3.5-4b-q6_k"
 
 
-def test_system_status_settings_and_shutdown(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+def test_system_status_settings_and_shutdown(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    pids_dir = tmp_path / ".pids"
+    monkeypatch.setattr(storage_routes, "PIDS_DIR", pids_dir)
+
     r_status = client.get("/api/system/status")
     assert r_status.status_code == 200
     st = r_status.json()
@@ -557,6 +564,7 @@ def test_system_status_settings_and_shutdown(client: TestClient, monkeypatch: py
         headers={"Origin": "https://evil.example.com"},
     )
     assert r_forbidden.status_code == 403
+    assert not (pids_dir / "shutdown.requested").exists()
 
     shutdown_called = {"called": False}
     monkeypatch.setattr(
@@ -571,6 +579,50 @@ def test_system_status_settings_and_shutdown(client: TestClient, monkeypatch: py
     assert r_shut.status_code == 200
     assert r_shut.json() == {"status": "shutting_down"}
     assert shutdown_called["called"] is True
+    assert (pids_dir / "shutdown.requested").is_file()
+    assert (pids_dir / "shutdown.requested").read_text(encoding="utf-8").strip() == "1"
+
+    # Authorized Tailscale UI origin should succeed when tailscale_enabled is True
+    (pids_dir / "shutdown.requested").unlink(missing_ok=True)
+    shutdown_called["called"] = False
+    r_ts_shut = client.post(
+        "/api/system/shutdown",
+        headers={"Origin": "http://100.124.136.6:5173"},
+    )
+    assert r_ts_shut.status_code == 200
+    assert r_ts_shut.json() == {"status": "shutting_down"}
+    assert shutdown_called["called"] is True
+    assert (pids_dir / "shutdown.requested").is_file()
+
+    # Tailscale UI origin must be rejected when tailscale_enabled is False
+    client.post("/api/system/settings", json={"tailscaleEnabled": False})
+    r_ts_forbidden = client.post(
+        "/api/system/shutdown",
+        headers={"Origin": "http://100.124.136.6:5173"},
+    )
+    assert r_ts_forbidden.status_code == 403
+
+
+def test_schedule_shutdown_exit_stops_all_service_pidfiles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    pids_dir = tmp_path / ".pids"
+    monkeypatch.setattr(storage_routes, "PIDS_DIR", pids_dir)
+
+    stopped_calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    def fake_stop_pid_file(pid_path: Path, *expected_cmd_substrs: str) -> bool:
+        stopped_calls.append((pid_path, expected_cmd_substrs))
+        return True
+
+    monkeypatch.setattr(storage_routes, "_stop_pid_file", fake_stop_pid_file)
+    storage_routes._schedule_shutdown_exit()
+
+    assert (pids_dir / "shutdown.requested").is_file()
+    assert (pids_dir / "llama.pid", ("llama-server",)) in stopped_calls
+    assert (pids_dir / "whisper.pid", ("whisper-server",)) in stopped_calls
+    assert (pids_dir / "frontend.pid", ("vite",)) in stopped_calls
 
 
 def test_no_unredirected_stdout_prints_in_mcp_path():

@@ -60,6 +60,9 @@ export interface S05PreviewState {
   recordedAudioUrl: string | null;
   takeSnapshot: TakeSnapshot | null;
   finalizeError: string | null;
+  liveRecognizedText?: string;
+  isStreamingChunk?: boolean;
+  recordingSec?: number;
 }
 
 interface ShadowingStudioProps {
@@ -91,9 +94,10 @@ interface ShadowingStudioProps {
 }
 
 const MAX_RECORDING_SEC = 3600;
-const STREAM_CHUNK_SAMPLES = 16000 * 10;
+const MIN_STREAM_CHUNK_SAMPLES = 16000 * 5;
+const MAX_STREAM_WINDOW_SAMPLES = 16000 * 14;
+const MAX_FINALIZE_TAIL_SAMPLES = 16000 * 12;
 const MIN_TAIL_SAMPLES = Math.floor(16000 * 0.35);
-const MAX_ANALYZE_WAV_SAMPLES = 16000 * 180;
 
 function normalizeReportFromAnalyzeApi(
   data: Record<string, any>,
@@ -299,6 +303,9 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   });
   const streamQueuePromiseRef = useRef<Promise<void>>(Promise.resolve());
   const activeStreamCountRef = useRef<number>(0);
+  const speechRecognitionRef = useRef<any>(null);
+  const webSpeechLiveRef = useRef<string>('');
+  const whisperCoveredWebSpeechLenRef = useRef<number>(0);
 
   const effectiveSegments =
     mode === 'listen_repeat'
@@ -339,8 +346,43 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       recordedAudioUrl,
       takeSnapshot,
       finalizeError,
+      liveRecognizedText,
+      isStreamingChunk,
+      recordingSec,
     });
-  }, [sessionState, previewResult, recordedAudioUrl, takeSnapshot, finalizeError, onPreviewStateChange]);
+  }, [
+    sessionState,
+    previewResult,
+    recordedAudioUrl,
+    takeSnapshot,
+    finalizeError,
+    liveRecognizedText,
+    isStreamingChunk,
+    recordingSec,
+    onPreviewStateChange,
+  ]);
+
+  const computeCombinedLiveText = (lang: LanguageCode): string => {
+    const sep = lang === 'ja' ? '' : ' ';
+    const whisperText = streamedTextPartsRef.current.join(sep).trim();
+    const webText = webSpeechLiveRef.current.trim();
+    if (!whisperText) return webText;
+    const coveredLen = whisperCoveredWebSpeechLenRef.current;
+    if (!webText || webText.length <= coveredLen) return whisperText;
+    let tailStart = coveredLen;
+    if (
+      lang !== 'ja' &&
+      tailStart > 0 &&
+      tailStart < webText.length &&
+      webText[tailStart - 1] !== ' '
+    ) {
+      const nextSpace = webText.indexOf(' ', tailStart);
+      if (nextSpace === -1) return whisperText;
+      tailStart = nextSpace + 1;
+    }
+    const webTail = webText.slice(tailStart).trim();
+    return webTail ? `${whisperText}${sep}${webTail}`.trim() : whisperText;
+  };
 
   const revokeActiveAudioUrl = () => {
     if (activeUrlRef.current) {
@@ -364,6 +406,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     };
     streamQueuePromiseRef.current = Promise.resolve();
     activeStreamCountRef.current = 0;
+    webSpeechLiveRef.current = '';
+    whisperCoveredWebSpeechLenRef.current = 0;
     setLiveRecognizedText('');
     setIsStreamingChunk(false);
   };
@@ -376,6 +420,17 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = null;
+    }
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.onresult = null;
+        speechRecognitionRef.current.onerror = null;
+        speechRecognitionRef.current.onend = null;
+        speechRecognitionRef.current.stop();
+      } catch {
+        // Ignore
+      }
+      speechRecognitionRef.current = null;
     }
     if (scriptProcessorRef.current) {
       scriptProcessorRef.current.onaudioprocess = null;
@@ -498,6 +553,14 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     };
   };
 
+  const waitWithTimeout = (promise: Promise<void>, ms: number): Promise<void> =>
+    Promise.race([
+      promise,
+      new Promise<void>((resolve) => {
+        window.setTimeout(resolve, ms);
+      }),
+    ]);
+
   const enqueueStreamChunk = (
     slice: Float32Array,
     snapshot: TakeSnapshot,
@@ -507,6 +570,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     if (telemetry.isSilent) return;
 
     const chunkWavBlob = float32ToPcm16Wav(slice, 16000);
+    const dispatchedWebLen = webSpeechLiveRef.current.length;
     activeStreamCountRef.current += 1;
     setIsStreamingChunk(true);
 
@@ -566,9 +630,11 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
             typeof data.recognizedText === 'string' ? data.recognizedText.trim() : '';
           if (recognized) {
             streamedTextPartsRef.current.push(recognized);
-            setLiveRecognizedText(
-              streamedTextPartsRef.current.join(snapshot.language === 'ja' ? '' : ' ')
+            whisperCoveredWebSpeechLenRef.current = Math.max(
+              whisperCoveredWebSpeechLenRef.current,
+              dispatchedWebLen
             );
+            setLiveRecognizedText(computeCombinedLiveText(snapshot.language));
           }
         } catch (err: any) {
           if (generation === captureGeneration.current) {
@@ -585,6 +651,32 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       });
   };
 
+  const startRecordingTimer = (snapshot: TakeSnapshot, generation: number) => {
+    if (timerIntervalRef.current) {
+      window.clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+    timerIntervalRef.current = window.setInterval(() => {
+      if (generation !== captureGeneration.current) return;
+      const elapsed = (Date.now() - startTimeMsRef.current) / 1000;
+      recordingSecRef.current = elapsed;
+      setRecordingSec(elapsed);
+
+      if (
+        sessionStateRef.current === 'recording' &&
+        activeStreamCountRef.current === 0 &&
+        unflushedSamplesCountRef.current >= MIN_STREAM_CHUNK_SAMPLES &&
+        unflushedChunksRef.current.length > 0
+      ) {
+        const toFlush = unflushedChunksRef.current;
+        unflushedChunksRef.current = [];
+        unflushedSamplesCountRef.current = 0;
+        const slice = concatFloat32Arrays(toFlush, MAX_STREAM_WINDOW_SAMPLES);
+        enqueueStreamChunk(slice, pendingSnapshotRef.current || snapshot, generation);
+      }
+    }, 150);
+  };
+
   const finalizeRecordedAudio = async (
     rawBlob: Blob,
     snapshot: TakeSnapshot,
@@ -597,43 +689,71 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     try {
       if (pcmChunksRef.current.length > 0) {
         const capturedPcmChunks = pcmChunksRef.current;
+        const hasLiveText =
+          streamedTextPartsRef.current.length > 0 ||
+          webSpeechLiveRef.current.trim().length > 0;
 
-        await streamQueuePromiseRef.current;
-        if (generation !== captureGeneration.current) return;
-
-        if (
-          unflushedSamplesCountRef.current >= MIN_TAIL_SAMPLES &&
-          unflushedChunksRef.current.length > 0
-        ) {
-          const tailChunks = unflushedChunksRef.current;
-          unflushedChunksRef.current = [];
-          unflushedSamplesCountRef.current = 0;
-          const tailSlice = concatFloat32Arrays(tailChunks);
-          enqueueStreamChunk(tailSlice, snapshot, generation);
-          await streamQueuePromiseRef.current;
+        if (activeStreamCountRef.current > 0) {
+          await waitWithTimeout(streamQueuePromiseRef.current, hasLiveText ? 4000 : 6000);
           if (generation !== captureGeneration.current) return;
         }
 
-        const fullPcm = concatFloat32Arrays(capturedPcmChunks);
+        const tailSamples = unflushedSamplesCountRef.current;
+        const tailChunks = unflushedChunksRef.current;
+        unflushedChunksRef.current = [];
+        unflushedSamplesCountRef.current = 0;
+
+        if (
+          activeStreamCountRef.current === 0 &&
+          tailSamples >= MIN_TAIL_SAMPLES &&
+          tailChunks.length > 0 &&
+          tailSamples <= MAX_FINALIZE_TAIL_SAMPLES
+        ) {
+          const tailSlice = concatFloat32Arrays(tailChunks);
+          enqueueStreamChunk(tailSlice, snapshot, generation);
+          await waitWithTimeout(streamQueuePromiseRef.current, 6000);
+          if (generation !== captureGeneration.current) return;
+        }
+
+        let fullPcm = concatFloat32Arrays(capturedPcmChunks);
+        if (
+          rawBlob.size > 0 &&
+          fullPcm.length / 16000 < Math.max(1.5, recordingSecRef.current * 0.75)
+        ) {
+          try {
+            const recovered = await encodeWav16kMono(rawBlob);
+            if (generation !== captureGeneration.current) return;
+            if (recovered.durationSec > fullPcm.length / 16000) {
+              const buf = await recovered.wavBlob.arrayBuffer();
+              if (generation !== captureGeneration.current) return;
+              if (buf.byteLength > 44) {
+                const view = new DataView(buf, 44);
+                const sampleCount = Math.floor((buf.byteLength - 44) / 2);
+                const recoveredPcm = new Float32Array(sampleCount);
+                for (let i = 0; i < sampleCount; i += 1) {
+                  recoveredPcm[i] = view.getInt16(i * 2, true) / 32768;
+                }
+                fullPcm = recoveredPcm;
+              }
+            }
+          } catch {
+            // Keep captured PCM if MediaRecorder decoding fails
+          }
+        }
+
         const fullTelemetry = computePcmTelemetry(fullPcm, 16000);
-        const isLongRecording = fullPcm.length > MAX_ANALYZE_WAV_SAMPLES;
-        const analysisPcm = isLongRecording
-          ? fullPcm.subarray(fullPcm.length - MAX_ANALYZE_WAV_SAMPLES)
-          : fullPcm;
-        const wavBlob = float32ToPcm16Wav(analysisPcm, 16000);
+        const fullWavBlob = float32ToPcm16Wav(fullPcm, 16000);
 
         revokeActiveAudioUrl();
-        const playbackUrl =
-          isLongRecording && rawBlob.size > 0
-            ? URL.createObjectURL(rawBlob)
-            : URL.createObjectURL(wavBlob);
+        const playbackUrl = URL.createObjectURL(fullWavBlob);
         activeUrlRef.current = playbackUrl;
         setRecordedAudioUrl(playbackUrl);
-        setRecordedWavBlob(wavBlob);
+        setRecordedWavBlob(fullWavBlob);
 
-        const recognizedText = streamedTextPartsRef.current
+        const whisperText = streamedTextPartsRef.current
           .join(snapshot.language === 'ja' ? '' : ' ')
           .trim();
+        const recognizedText = whisperText || webSpeechLiveRef.current.trim();
         const activeRms = streamedMetricsRef.current.activeRmsValues;
         const reportedRmsDb = !fullTelemetry.isSilent
           ? fullTelemetry.rmsDb
@@ -752,6 +872,12 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioCtx = new AudioCtx();
       audioContextRef.current = audioCtx;
+      await audioCtx.resume().catch(() => {});
+      if (generation !== captureGeneration.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        audioCtx.close().catch(() => {});
+        return false;
+      }
       const source = audioCtx.createMediaStreamSource(stream);
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
@@ -777,14 +903,6 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           pcmChunksRef.current.push(downsampled);
           unflushedChunksRef.current.push(downsampled);
           unflushedSamplesCountRef.current += downsampled.length;
-
-          if (unflushedSamplesCountRef.current >= STREAM_CHUNK_SAMPLES) {
-            const toFlush = unflushedChunksRef.current;
-            unflushedChunksRef.current = [];
-            unflushedSamplesCountRef.current = 0;
-            const slice = concatFloat32Arrays(toFlush);
-            enqueueStreamChunk(slice, pendingSnapshotRef.current || snapshot, generation);
-          }
         };
 
         source.connect(processor);
@@ -792,6 +910,46 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         silentGain.connect(audioCtx.destination);
         scriptProcessorRef.current = processor;
         silentGainRef.current = silentGain;
+      }
+
+      if (typeof window !== 'undefined') {
+        const SpeechRec =
+          (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (SpeechRec) {
+          try {
+            const rec = new SpeechRec();
+            rec.continuous = true;
+            rec.interimResults = true;
+            rec.lang = snapshot.language === 'ja' ? 'ja-JP' : 'en-US';
+            rec.onresult = (event: any) => {
+              if (generation !== captureGeneration.current) return;
+              let finalPart = '';
+              let interimPart = '';
+              for (let i = 0; i < event.results.length; i += 1) {
+                const res = event.results[i];
+                const text = String(res?.[0]?.transcript || '');
+                if (res?.isFinal) {
+                  finalPart += text;
+                } else {
+                  interimPart += text;
+                }
+              }
+              const sep = snapshot.language === 'ja' ? '' : ' ';
+              webSpeechLiveRef.current = [finalPart.trim(), interimPart.trim()]
+                .filter(Boolean)
+                .join(sep)
+                .trim();
+              setLiveRecognizedText(computeCombinedLiveText(snapshot.language));
+            };
+            rec.onerror = () => {
+              // Non-fatal; local Whisper streaming remains primary
+            };
+            rec.start();
+            speechRecognitionRef.current = rec;
+          } catch {
+            // Browser SpeechRecognition unavailable or blocked
+          }
+        }
       }
 
       const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -828,12 +986,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       recorder.start(250);
       updateSessionState('recording');
       startTimeMsRef.current = Date.now();
-
-      timerIntervalRef.current = window.setInterval(() => {
-        const elapsed = (Date.now() - startTimeMsRef.current) / 1000;
-        recordingSecRef.current = elapsed;
-        setRecordingSec(elapsed);
-      }, 150);
+      startRecordingTimer(snapshot, generation);
 
       return true;
     } catch (err: any) {
@@ -986,12 +1139,10 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         playerHandleRef.current?.play();
       }
       startTimeMsRef.current = Date.now() - recordingSecRef.current * 1000;
-      timerIntervalRef.current = window.setInterval(() => {
-        const elapsed = (Date.now() - startTimeMsRef.current) / 1000;
-        recordingSecRef.current = elapsed;
-        setRecordingSec(elapsed);
-      }, 150);
       updateSessionState('recording');
+      const resumeSnapshot =
+        pendingSnapshotRef.current || takeSnapshot || createSnapshot(effectiveSegments, mode);
+      startRecordingTimer(resumeSnapshot, captureGeneration.current);
     }
   };
 
@@ -1519,6 +1670,8 @@ export const RecognizedSpeechPreview: React.FC<RecognizedSpeechPreviewProps> = (
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   if (
+    sessionState !== 'recording' &&
+    sessionState !== 'paused' &&
     sessionState !== 'finalizing' &&
     sessionState !== 'ready' &&
     sessionState !== 'analyzing'
@@ -1526,6 +1679,7 @@ export const RecognizedSpeechPreview: React.FC<RecognizedSpeechPreviewProps> = (
     return null;
   }
 
+  const isLiveSession = sessionState === 'recording' || sessionState === 'paused';
   const hasSpeech = Boolean(
     preview && !preview.isSilent && preview.recognizedText.trim().length > 0
   );
@@ -1540,27 +1694,49 @@ export const RecognizedSpeechPreview: React.FC<RecognizedSpeechPreviewProps> = (
           AI Recognized Speech:
         </h2>
 
-        {preview && (
+        {isLiveSession ? (
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-medium ${
-                hasSpeech
-                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                  : 'bg-amber-50 text-amber-800 border border-amber-200'
-              }`}
-            >
-              {hasSpeech ? (
-                <CheckCircle2 className="w-3.5 h-3.5" />
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-medium bg-sky-50 text-sky-800 border border-sky-200">
+              {state.isStreamingChunk ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-600" />
               ) : (
-                <AlertTriangle className="w-3.5 h-3.5" />
+                <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
               )}
               <span>
-                Audio Ready · {preview.durationSec.toFixed(1)}s · {preview.rmsDb.toFixed(1)} dBFS
+                Live Streaming · {(state.recordingSec ?? 0).toFixed(1)}s
               </span>
             </span>
           </div>
+        ) : (
+          preview && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-medium ${
+                  hasSpeech
+                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                    : 'bg-amber-50 text-amber-800 border border-amber-200'
+                }`}
+              >
+                {hasSpeech ? (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                ) : (
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                )}
+                <span>
+                  Audio Ready · {preview.durationSec.toFixed(1)}s · {preview.rmsDb.toFixed(1)} dBFS
+                </span>
+              </span>
+            </div>
+          )
         )}
       </div>
+
+      {isLiveSession && (
+        <p className="text-sm sm:text-base text-slate-800 leading-relaxed bg-slate-50 border border-slate-200/80 rounded-lg p-4">
+          {state.liveRecognizedText?.trim() ||
+            'Listening and transcribing your speech in real time...'}
+        </p>
+      )}
 
       {sessionState === 'finalizing' && (
         <div className="flex items-center gap-2 text-sm text-slate-600 py-3">
@@ -1575,7 +1751,7 @@ export const RecognizedSpeechPreview: React.FC<RecognizedSpeechPreviewProps> = (
         </div>
       )}
 
-      {preview && sessionState !== 'finalizing' && (
+      {preview && !isLiveSession && sessionState !== 'finalizing' && (
         <>
           {!hasSpeech ? (
             <div
@@ -1598,60 +1774,67 @@ export const RecognizedSpeechPreview: React.FC<RecognizedSpeechPreviewProps> = (
         </>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            type="button"
-            onClick={onAnalyzeResult}
-            disabled={
-              sessionState !== 'ready' || Boolean(finalizeError)
-            }
-            className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-          >
-            {sessionState === 'analyzing' ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Analyzing Shadowing Result...</span>
-              </>
-            ) : (
-              <>
-                <Sparkles className="w-4 h-4" />
-                <span>Analyze Shadowing Result</span>
-              </>
-            )}
-          </button>
-
-          {recordedAudioUrl && (
+      {!isLiveSession && (
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+          <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
-              onClick={() => audioRef.current?.play().catch(() => {})}
-              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              onClick={onAnalyzeResult}
+              disabled={
+                sessionState !== 'ready' || Boolean(finalizeError)
+              }
+              className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
             >
-              <Play className="w-3.5 h-3.5" />
-              <span>Play Recorded Audio</span>
+              {sessionState === 'analyzing' ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Analyzing Shadowing Result...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4" />
+                  <span>Analyze Shadowing Result</span>
+                </>
+              )}
             </button>
+
+            {recordedAudioUrl && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (audioRef.current) {
+                    audioRef.current.currentTime = 0;
+                    audioRef.current.play().catch(() => {});
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span>Play Recorded Audio</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={onRecordAgain}
+              disabled={sessionState === 'analyzing'}
+              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Record Again</span>
+            </button>
+          </div>
+
+          {recordedAudioUrl && (
+            <audio
+              ref={audioRef}
+              controls
+              src={recordedAudioUrl}
+              className="h-8 max-w-[260px]"
+            />
           )}
-
-          <button
-            type="button"
-            onClick={onRecordAgain}
-            disabled={sessionState === 'analyzing'}
-            className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Record Again</span>
-          </button>
         </div>
-
-        {recordedAudioUrl && (
-          <audio
-            ref={audioRef}
-            controls
-            src={recordedAudioUrl}
-            className="h-8 max-w-[260px]"
-          />
-        )}
-      </div>
+      )}
     </section>
   );
 };

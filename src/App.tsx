@@ -918,17 +918,39 @@ export default function App() {
   const handleConfirmShutdown = async () => {
     setIsShuttingDown(true);
     setShutdownError(null);
+    const verifyServerStopped = async (): Promise<boolean> => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      try {
+        const healthRes = await fetch('/api/health');
+        return !healthRes.ok;
+      } catch {
+        return true;
+      }
+    };
+
     try {
       const res = await fetch('/api/system/shutdown', {
         method: 'POST',
       });
       if (!res.ok) {
+        if (res.status === 502 || res.status === 503 || res.status === 504) {
+          if (await verifyServerStopped()) {
+            setShowShutdownConfirm(false);
+            setServerStopped(true);
+            return;
+          }
+        }
         const data = await res.json().catch(() => ({}));
         throw new Error(data?.detail || 'Shutdown request was rejected.');
       }
       setShowShutdownConfirm(false);
       setServerStopped(true);
     } catch (err: any) {
+      if (await verifyServerStopped()) {
+        setShowShutdownConfirm(false);
+        setServerStopped(true);
+        return;
+      }
       setShutdownError(err?.message || 'Could not shut down server cleanly.');
     } finally {
       setIsShuttingDown(false);
