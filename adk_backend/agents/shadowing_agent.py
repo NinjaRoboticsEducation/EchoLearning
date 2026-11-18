@@ -6,7 +6,7 @@ from typing import Any
 from google.adk.agents import LlmAgent
 from pydantic import BaseModel, Field
 
-from ..schemas.shadowing_schemas import PhonemeFeedbackItem, ShadowingAssessmentReport
+from ..schemas.shadowing_schemas import PhonemeFeedbackItem
 from ..tools.whisper_tools import (
     evaluate_acoustics_and_alignment,
     transcribe_and_analyze_audio,
@@ -33,20 +33,24 @@ ShadowingCoachingNotes = CoachingFeedbackOutput
 
 
 SHADOWING_AGENT_INSTRUCTION = """You are an expert English and Japanese speech, phonetics, and shadowing coach.
-You will receive deterministic acoustic measurements, speech rate, F0 pitch variation, and word-level alignment
-that have ALREADY been computed from the learner's recording.
+You will receive deterministic acoustic measurements, speech rate, F0 pitch variation (in Hz and Semitones),
+and Top 2-3 priority word-level alignment targets that have ALREADY been computed from the learner's recording.
 
 Your ONLY job is to generate concise, encouraging, actionable qualitative coaching grounded in those exact facts:
 - scoreExplanation: 1-2 sentences explaining the measured performance honestly.
 - feedback: Concise coaching summary (can match scoreExplanation).
-- pronunciationFeedback: 1-4 items pointing to specific omitted/substituted words or articulation/mora issues:
+- pronunciationFeedback: 1-3 items pointing ONLY to the Top 2-3 priority omitted/substituted targets:
   { targetWord, readingOrIpa, category, observedIssue, actionableTip, severity: "high"|"medium"|"low" }
-- intonationTips: 1-3 specific pitch/rhythm/intonation tips referencing their measured F0 variation or pauses.
-- improvementSuggestions: 2-3 short actionable practice steps.
+  For actionableTip, guide the learner with the 1-1-1 Phrase-Build drill (say the isolated word 1x, then a 2-3 word local phrase chunk 1x, then the full sentence 1x).
+- intonationTips: 1-3 specific pitch/rhythm/intonation tips referencing their measured Semitone F0 variation or unplanned pauses.
+- improvementSuggestions: 2-3 short actionable practice steps (including 1-1-1 Phrase-Build when helpful).
 - actionableImprovements: Same 2-3 short actionable practice steps.
 - recommendedRetryText: Specific short phrase to practice next (from target script).
 
-Do NOT invent transcript text or change numeric scores.
+Guardrails:
+- Do NOT invent phonetic faults for matched ("correct") words or blame self-repair false starts.
+- For any "stt_uncertain" items, hedge with uncertainty (e.g., "The speech recognizer may have misheard...") instead of asserting an articulation error.
+- Do NOT invent transcript text or change numeric scores.
 Respond ONLY with a single JSON object matching the keys above.
 """
 
@@ -63,13 +67,17 @@ def create_shadowing_agent() -> LlmAgent:
 
 COACHING_AGENT_INSTRUCTION = """/no_think
 You are an expert English and Japanese shadowing coach.
-You receive pre-computed deterministic scores, acoustic measurements, and up to 8 mismatched words.
+You receive pre-computed deterministic scores, acoustic measurements (including Semitone F0 std and unplanned pauses), and the Top 2-3 priority mismatched words (plus optional stt_uncertain candidates).
 Do NOT call any tools. Do NOT output <think> blocks, explanations, or markdown fences.
+Guardrails:
+- Focus ONLY on the Top 2-3 mismatchedWords; never invent phonetic faults for matched words or self-repairs.
+- Hedge any stt_uncertain item with uncertainty (e.g. "The speech recognizer may have misheard...").
+- Suggest the 1-1-1 Phrase-Build drill (1x isolated word -> 1x local phrase chunk -> 1x full sentence) in tips.
 Respond ONLY with a single raw JSON object containing:
 - "scoreExplanation": 1-2 short sentences explaining the measured performance.
 - "pronunciationFeedback": 1-3 items {"targetWord", "readingOrIpa", "category", "observedIssue", "actionableTip", "severity": "high"|"medium"|"low"}.
-- "intonationTips": 1-2 short tips referencing measured F0 variation or pauses.
-- "improvementSuggestions": 2-3 short actionable practice steps.
+- "intonationTips": 1-2 short tips referencing measured Semitone F0 variation or unplanned pauses.
+- "improvementSuggestions": 2-3 short actionable practice steps using 1-1-1 Phrase-Build.
 """
 
 
@@ -83,6 +91,49 @@ def create_coaching_agent() -> LlmAgent:
     )
 
 
+def _build_phrase_chunk(target_text: str, target_word: str, language: str, token_index: int | None = None) -> str:
+    """Extracts a compact 2-3 word local phrase chunk around target_word for 1-1-1 Phrase-Build."""
+    if not target_text:
+        return target_word
+    if language == "ja":
+        idx = target_text.find(target_word)
+        if idx >= 0:
+            start = max(0, idx - 3)
+            end = min(len(target_text), idx + len(target_word) + 3)
+            return target_text[start:end].strip()
+        return target_word
+    words = target_text.split()
+    if not words:
+        return target_word
+    pos = token_index if (token_index is not None and 0 <= token_index < len(words)) else None
+    if pos is None:
+        lower_w = target_word.lower()
+        for i, w in enumerate(words):
+            if lower_w in w.lower():
+                pos = i
+                break
+    if pos is None:
+        return target_word
+    lo = max(0, pos - 1)
+    hi = min(len(words), pos + 2)
+    return " ".join(words[lo:hi])
+
+
+def _select_priority_errors(det_report: dict[str, Any], limit: int = 3) -> list[dict[str, Any]]:
+    """Selects Top 2-3 priority omitted/substituted errors, excluding stt_uncertain and self_repair."""
+    priority_tokens = det_report.get("priorityTokens") or []
+    ranked = [
+        t for t in priority_tokens
+        if t.get("status") in ("omitted", "substituted")
+    ]
+    if ranked:
+        return ranked[:limit]
+    return [
+        w for w in (det_report.get("wordDiff") or [])
+        if w.get("status") in ("omitted", "substituted")
+    ][:limit]
+
+
 def _build_deterministic_coaching(det_report: dict[str, Any], language: str) -> dict[str, Any]:
     """Builds deterministic qualitative coaching when LLM is unavailable or partial."""
     overall = det_report["overallScore"]
@@ -90,30 +141,46 @@ def _build_deterministic_coaching(det_report: dict[str, Any], language: str) -> 
     fluency = det_report["fluencyScore"]
     prosody = det_report["prosodyScore"]
     f0_std = float(det_report.get("f0StdHz", 0.0))
+    f0_std_st = float(det_report.get("f0StdSt", 0.0))
     pause_count = int(det_report.get("pauseCount", 0))
+    unplanned_pauses = int(det_report.get("unplannedPauseCount", pause_count))
+    is_clipped = bool(det_report.get("isClipped", False))
     rate_val = det_report["speechRateValue"]
     target_rate = det_report["targetRateValue"]
+    target_text = str(det_report.get("targetText") or "")
     unit = "Moras/min" if language == "ja" else "WPM"
 
+    priority_errors = _select_priority_errors(det_report, limit=3)
     feedback_items: list[dict[str, Any]] = []
-    for item in det_report.get("wordDiff", []):
-        if item.get("status") in ("substituted", "omitted"):
-            target_w = item.get("expectedWord") or item.get("word", "")
-            feedback_items.append(
-                {
-                    "targetWord": target_w,
-                    "readingOrIpa": item.get("reading") or "",
-                    "category": "Articulation & Lexical Accuracy",
-                    "observedIssue": item.get("explanation") or f"Discrepancy on '{target_w}'.",
-                    "actionableTip": f"Practice '{target_w}' slowly in isolation, then blend it back into the phrase.",
-                    "severity": "medium",
-                }
-            )
-        if len(feedback_items) >= 3:
-            break
+    for item in priority_errors:
+        target_w = item.get("expectedWord") or item.get("word", "")
+        chunk = _build_phrase_chunk(target_text, target_w, language, item.get("index"))
+        severity = "high" if item.get("isContentWord", True) and item.get("flCategory") else "medium"
+        feedback_items.append(
+            {
+                "targetWord": target_w,
+                "readingOrIpa": item.get("reading") or "",
+                "category": "Articulation & Lexical Accuracy",
+                "observedIssue": item.get("explanation") or f"Discrepancy on '{target_w}'.",
+                "actionableTip": (
+                    f"1-1-1 Phrase-Build drill: say '{target_w}' 1x clearly, "
+                    f"then the chunk '{chunk}' 1x, then the full sentence 1x."
+                ),
+                "severity": severity,
+            }
+        )
+
+    uncertain_items = [
+        w for w in (det_report.get("wordDiff") or [])
+        if w.get("status") == "stt_uncertain"
+    ]
 
     intonation_tips: list[str] = []
-    if f0_std > 0 and f0_std < 8.0:
+    if f0_std_st > 0.0 and f0_std_st < 0.85:
+        intonation_tips.append(
+            f"Pitch range was narrow ({f0_std_st:.2f} ST / {f0_std:.1f} Hz); exaggerate stressed syllables and phrase-final pitch drops."
+        )
+    elif f0_std_st == 0.0 and f0_std > 0.0 and f0_std < 8.0:
         intonation_tips.append(
             f"Pitch variation was narrow (F0 std {f0_std:.1f} Hz); exaggerate stressed syllables and pitch drops."
         )
@@ -122,16 +189,30 @@ def _build_deterministic_coaching(det_report: dict[str, Any], language: str) -> 
             "Match the speaker's phrase-final rise/fall contour and stressed vowel peaks."
         )
 
-    if pause_count >= 2:
+    if unplanned_pauses >= 2:
         intonation_tips.append(
-            f"Detected {pause_count} mid-phrase pauses (>=350ms); aim to link words across each clause."
+            f"Detected {unplanned_pauses} unplanned mid-clause pauses (>=250ms); aim to link words smoothly across each clause."
+        )
+    if is_clipped:
+        intonation_tips.append(
+            "Microphone clipping was detected; lower input gain or step back 15-25 cm for cleaner clarity."
         )
 
     improvements: list[str] = []
-    if accuracy < 80.0:
-        improvements.append("Review omitted or substituted words in the target line before your next take.")
+    if feedback_items:
+        focus_words = ", ".join(f"'{it['targetWord']}'" for it in feedback_items[:2])
+        improvements.append(
+            f"Use the 1-1-1 Phrase-Build drill on {focus_words}: 1x isolated word, 1x local phrase chunk, 1x full sentence."
+        )
+    elif accuracy < 80.0:
+        improvements.append("Review omitted or substituted words using 1-1-1 Phrase-Build before your next take.")
+    if uncertain_items and not feedback_items:
+        unc_w = uncertain_items[0].get("expectedWord") or uncertain_items[0].get("word", "")
+        improvements.append(
+            f"The speech recognizer may have misheard '{unc_w}'; try articulating that chunk slightly more crisply."
+        )
     if fluency < 75.0:
-        improvements.append("Reduce mid-sentence hesitations by shadowing one short clause at a time.")
+        improvements.append("Reduce unplanned mid-clause hesitations by shadowing one short clause at a time.")
     if prosody < 75.0:
         improvements.append("Listen with headphones and mirror the speaker's pitch contour and rhythm.")
     if not improvements:
@@ -150,7 +231,7 @@ def _build_deterministic_coaching(det_report: dict[str, Any], language: str) -> 
         "intonationTips": intonation_tips,
         "improvementSuggestions": improvements,
         "actionableImprovements": improvements,
-        "recommendedRetryText": det_report.get("targetText", ""),
+        "recommendedRetryText": target_text,
     }
 
 
@@ -178,6 +259,7 @@ def create_deterministic_shadowing_report(
         "silenceRatio": 0.15 if (spoken_text or "").strip() else 1.0,
         "voicedFrames": 25 if (spoken_text or "").strip() else 0,
         "f0StdHz": 18.0 if (spoken_text or "").strip() else 0.0,
+        "f0StdSt": 2.4 if (spoken_text or "").strip() else 0.0,
         "pitchContour": [],
     }
 
@@ -191,6 +273,7 @@ def create_deterministic_shadowing_report(
         whisper_info=whisper_info,
         ref_comparison=ref_comparison,
         simulated_take=simulated_take,
+        mode=mode,
     )
     det["mode"] = mode
     det["language"] = language
@@ -214,10 +297,12 @@ async def generate_coaching_and_merge(
     if det_report.get("hardGateTriggered"):
         return det_report
 
-    # Safe JSON-escaped inputs in prompt (C10); keep payload compact for fast CPU inference
-    mismatched_words = [
-        w for w in (det_report.get("wordDiff") or []) if w.get("status") != "correct"
-    ][:8]
+    # Safe JSON-escaped inputs in prompt (C10); pass ONLY Top 2-3 priority errors to Qwen3.5
+    mismatched_words = _select_priority_errors(det_report, limit=3)
+    uncertain_words = [
+        t for t in (det_report.get("priorityTokens") or [])
+        if t.get("status") == "stt_uncertain"
+    ][:2]
     prompt_payload = {
         "language": language,
         "mode": mode,
@@ -234,12 +319,17 @@ async def generate_coaching_and_merge(
             "durationSec": det_report.get("durationSec"),
             "rmsDb": det_report.get("rmsDb"),
             "pauseCount": det_report.get("pauseCount"),
+            "unplannedPauseCount": det_report.get("unplannedPauseCount"),
             "silenceRatio": det_report.get("silenceRatio"),
             "f0StdHz": det_report.get("f0StdHz"),
+            "f0StdSt": det_report.get("f0StdSt"),
+            "isClipped": det_report.get("isClipped"),
+            "durationLatencySec": det_report.get("durationLatencySec"),
             "speechRateValue": det_report.get("speechRateValue"),
             "targetRateValue": det_report.get("targetRateValue"),
         },
         "mismatchedWords": mismatched_words,
+        "uncertainWords": uncertain_words,
     }
 
     prompt = (
@@ -299,6 +389,9 @@ async def evaluate_shadowing_with_agent(
     web_speech_transcript: str | None = None,
 ) -> dict[str, Any]:
     """Evaluates shadowing attempt: deterministic acoustics + alignment FIRST, then ADK coaching."""
+    import base64
+    import uuid
+
     from ..config import TEMP_AUDIO_DIR
     from ..tools.whisper_tools import (
         analyze_wav_acoustics,
@@ -306,8 +399,6 @@ async def evaluate_shadowing_with_agent(
         inspect_wav_header,
         transcribe_audio_with_whisper,
     )
-    import base64
-    import uuid
 
     # Simulated demo take (no audio bytes)
     if not audio_base64:

@@ -5,6 +5,7 @@ import {
   ArrowRight,
   CheckCircle2,
   Headphones,
+  Info,
   Loader2,
   Mic,
   Pause,
@@ -90,7 +91,10 @@ interface ShadowingStudioProps {
   videoEndedCount?: number;
   latestReport?: ShadowingAssessmentReport | null;
   onAdvanceToNextSegment?: () => TranscriptSegment | null;
-  onAdvanceToSegmentIndex?: (index: number) => TranscriptSegment | null;
+  onAdvanceToSegmentIndex?: (
+    index: number,
+    selectSingle?: boolean
+  ) => TranscriptSegment | null;
   triggerAnalyzeRef?: React.MutableRefObject<(() => void) | null>;
   triggerRecordAgainRef?: React.MutableRefObject<(() => void) | null>;
 }
@@ -101,6 +105,37 @@ const MIN_STREAM_CHUNK_SAMPLES = 16000 * 6;
 const MAX_STREAM_CHUNK_SAMPLES = 16000 * 18;
 const MAX_DRAIN_CHUNK_SAMPLES = 16000 * 20;
 const MIN_TAIL_SAMPLES = Math.floor(16000 * 0.35);
+
+function extractChunkWordConfidences(data: Record<string, any>): number[] {
+  const confs: number[] = [];
+  if (Array.isArray(data.wordConfidences)) {
+    for (const item of data.wordConfidences) {
+      const prob =
+        typeof item === 'number'
+          ? item
+          : typeof item?.probability === 'number'
+          ? item.probability
+          : null;
+      if (prob !== null && Number.isFinite(prob)) {
+        confs.push(Math.max(0, Math.min(1, prob)));
+      }
+    }
+  }
+  if (
+    confs.length === 0 &&
+    typeof data.meanConfidence === 'number' &&
+    Number.isFinite(data.meanConfidence)
+  ) {
+    confs.push(Math.max(0, Math.min(1, data.meanConfidence)));
+  }
+  return confs;
+}
+
+function computeMeanConfidence(confs: number[]): number | undefined {
+  if (confs.length === 0) return undefined;
+  const total = confs.reduce((sum, val) => sum + val, 0);
+  return Number((total / confs.length).toFixed(3));
+}
 
 function normalizeReportFromAnalyzeApi(
   data: Record<string, any>,
@@ -146,6 +181,33 @@ function normalizeReportFromAnalyzeApi(
   const speechRateWpm = Number(
     data.speechRateWpm ?? data.metrics?.speechRateValue ?? data.speechRateValue ?? 0
   );
+  const f0StdStRaw = data.f0StdSt ?? data.metrics?.f0StdSt;
+  const f0StdSt =
+    typeof f0StdStRaw === 'number' && Number.isFinite(f0StdStRaw) ? f0StdStRaw : undefined;
+  const unplannedPauseRaw = data.unplannedPauseCount ?? data.metrics?.unplannedPauseCount;
+  const unplannedPauseCount =
+    typeof unplannedPauseRaw === 'number' && Number.isFinite(unplannedPauseRaw)
+      ? unplannedPauseRaw
+      : undefined;
+  const repairCountRaw = data.repairCount ?? data.metrics?.repairCount;
+  const repairCount =
+    typeof repairCountRaw === 'number' && Number.isFinite(repairCountRaw)
+      ? repairCountRaw
+      : wordDiff.filter((t) => t.status === 'self_repair').length;
+  const isClipped = Boolean(data.isClipped ?? data.metrics?.isClipped ?? false);
+  const durationLatencyRaw = data.durationLatencySec ?? data.metrics?.durationLatencySec;
+  const durationLatencySec =
+    typeof durationLatencyRaw === 'number' && Number.isFinite(durationLatencyRaw)
+      ? durationLatencyRaw
+      : undefined;
+  const articulationRateRaw =
+    data.articulationRateValue ?? data.metrics?.articulationRateValue;
+  const articulationRateValue =
+    typeof articulationRateRaw === 'number' && Number.isFinite(articulationRateRaw)
+      ? articulationRateRaw
+      : undefined;
+  const assessmentStatus =
+    typeof data.assessmentStatus === 'string' ? data.assessmentStatus : undefined;
 
   return {
     id: data.id || `rep-${Date.now()}`,
@@ -160,6 +222,13 @@ function normalizeReportFromAnalyzeApi(
     recognizedTranscript:
       data.recognizedTranscript ?? data.recognizedText ?? '',
     overallScore: Number(data.overallScore ?? 0),
+    assessmentStatus,
+    f0StdSt,
+    unplannedPauseCount,
+    repairCount,
+    isClipped,
+    durationLatencySec,
+    articulationRateValue,
     dimensions: {
       contentAccuracy,
       pronunciation,
@@ -177,6 +246,12 @@ function normalizeReportFromAnalyzeApi(
       omittedCount: Number(data.metrics?.omittedCount ?? omittedCount),
       substitutedCount: Number(data.metrics?.substitutedCount ?? substitutedCount),
       uncertainSttCount: Number(data.metrics?.uncertainSttCount ?? uncertainSttCount),
+      f0StdSt,
+      unplannedPauseCount,
+      repairCount,
+      isClipped,
+      durationLatencySec,
+      articulationRateValue,
     },
     scoreExplanation:
       data.scoreExplanation ||
@@ -268,6 +343,13 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const simultaneousStartVideoSecRef = useRef<number>(0);
   const [capturedSimultaneousSegments, setCapturedSimultaneousSegments] =
     useState<TranscriptSegment[] | null>(null);
+  const [videoEndedDuringRecording, setVideoEndedDuringRecording] = useState(false);
+  const videoEndedAtStartRef = useRef<number>(0);
+  const [consecutiveTakeState, setConsecutiveTakeState] = useState<{
+    segmentKey: string;
+    count: number;
+  }>({ segmentKey: '', count: 0 });
+  const [dismissedNudgeKey, setDismissedNudgeKey] = useState<string>('');
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -294,6 +376,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     pauseCount: number;
     pitchContour: number[];
     activeRmsValues: number[];
+    wordConfidences: number[];
     whisperError: string | null;
     chunkCount: number;
   }>({
@@ -301,6 +384,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     pauseCount: 0,
     pitchContour: [],
     activeRmsValues: [],
+    wordConfidences: [],
     whisperError: null,
     chunkCount: 0,
   });
@@ -314,7 +398,9 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
 
   const effectiveSegments =
     mode === 'listen_repeat'
-      ? [activeSegment]
+      ? targetSegments.length > 0
+        ? targetSegments
+        : [activeSegment]
       : capturedSimultaneousSegments && capturedSimultaneousSegments.length > 0
       ? capturedSimultaneousSegments
       : targetSegments.length > 1
@@ -322,6 +408,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       : allSegments.length > 0
       ? allSegments.slice(Math.max(0, activeSegment.index))
       : [activeSegment];
+  const effectiveSegmentKey = effectiveSegments.map((s) => s.id).join(',');
 
   const targetText = effectiveSegments
     .map((s) => s.text)
@@ -406,6 +493,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       pauseCount: 0,
       pitchContour: [],
       activeRmsValues: [],
+      wordConfidences: [],
       whisperError: null,
       chunkCount: 0,
     };
@@ -528,16 +616,39 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     }
   }, [autoPauseTriggerCount]);
 
-  // Auto-stop recording if video ends during Simultaneous capture (R03)
+  // Handle YouTube ENDED event during listening (last-segment listen_repeat) or Simultaneous recording
   useEffect(() => {
-    if (
-      videoEndedCount > 0 &&
+    if (videoEndedCount <= 0 || videoEndedCount <= videoEndedAtStartRef.current) {
+      return;
+    }
+    if (mode === 'listen_repeat' && sessionState === 'listening') {
+      onSetAutoPauseAtSec(null);
+      startMicrophoneCapture(pendingSnapshotRef.current || undefined);
+    } else if (
       mode === 'simultaneous' &&
       (sessionState === 'recording' || sessionState === 'paused')
     ) {
-      handleFinishRecording();
+      // Simultaneous mode NEVER auto-stops on video end; display subtle hint until user clicks Finish Recording
+      setVideoEndedDuringRecording(true);
     }
   }, [videoEndedCount]);
+
+  // Reset ready/reviewed preview back to idle when checked segments change
+  useEffect(() => {
+    if (sessionState !== 'ready' && sessionState !== 'reviewed') return;
+    const snapshotKey = takeSnapshot?.segmentIds.join(',') || '';
+    if (effectiveSegmentKey && snapshotKey && effectiveSegmentKey !== snapshotKey) {
+      setCapturedSimultaneousSegments(null);
+      setFinalizeError(null);
+      setPreviewResult(null);
+      setRecordedWavBlob(null);
+      revokeActiveAudioUrl();
+      setRecordedAudioUrl(null);
+      setTakeSnapshot(null);
+      resetStreamingState();
+      updateSessionState('idle');
+    }
+  }, [effectiveSegmentKey, sessionState, takeSnapshot]);
 
   // Auto-stop recording at 3600s (60-minute) ceiling
   useEffect(() => {
@@ -614,6 +725,10 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           if (typeof data.rmsDb === 'number' && !data.isSilent) {
             streamedMetricsRef.current.activeRmsValues.push(data.rmsDb);
           }
+          const chunkConfs = extractChunkWordConfidences(data);
+          if (chunkConfs.length > 0) {
+            streamedMetricsRef.current.wordConfidences.push(...chunkConfs);
+          }
           if (Array.isArray(data.pitchContour) && data.pitchContour.length > 0) {
             const combined = streamedMetricsRef.current.pitchContour.concat(
               data.pitchContour.filter((v: unknown) => typeof v === 'number')
@@ -671,11 +786,15 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       setRecordingSec(elapsed);
 
       const activeMode = (pendingSnapshotRef.current || snapshot).mode;
+      const streamTriggerSamples =
+        activeMode === 'simultaneous'
+          ? MIN_STREAM_TRIGGER_SAMPLES
+          : MAX_STREAM_CHUNK_SAMPLES;
       if (
-        activeMode === 'simultaneous' &&
+        (activeMode === 'simultaneous' || activeMode === 'listen_repeat') &&
         sessionStateRef.current === 'recording' &&
         activeStreamCountRef.current === 0 &&
-        unflushedSamplesCountRef.current >= MIN_STREAM_TRIGGER_SAMPLES &&
+        unflushedSamplesCountRef.current >= streamTriggerSamples &&
         unflushedChunksRef.current.length > 0
       ) {
         const { flushSlice, remainingChunks, remainingSamples } =
@@ -707,7 +826,11 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       if (pcmChunksRef.current.length > 0) {
         const capturedPcmChunks = pcmChunksRef.current;
 
-        if (snapshot.mode === 'listen_repeat' && streamedTextPartsRef.current.length === 0) {
+        if (
+          snapshot.mode === 'listen_repeat' &&
+          streamedTextPartsRef.current.length === 0 &&
+          activeStreamCountRef.current === 0
+        ) {
           unflushedChunksRef.current = [];
           unflushedSamplesCountRef.current = 0;
 
@@ -755,6 +878,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
             fullTelemetry.durationSec > 0 ? fullTelemetry.durationSec : durationFallback;
           let isSilent = fullTelemetry.isSilent;
           let pitchContour: number[] | undefined;
+          let wordConfidences: number[] = [];
+          let meanConfidence: number | undefined;
 
           if (fullPcm.length > 0 && !fullTelemetry.isSilent) {
             const controller = new AbortController();
@@ -789,6 +914,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
                 if (Array.isArray(data.pitchContour) && data.pitchContour.length > 0) {
                   pitchContour = data.pitchContour;
                 }
+                wordConfidences = extractChunkWordConfidences(data);
+                meanConfidence = computeMeanConfidence(wordConfidences);
                 if (data.whisperError) {
                   whisperError = String(data.whisperError);
                 }
@@ -819,6 +946,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
             pauseCount,
             silenceRatio,
             pitchContour,
+            wordConfidences: wordConfidences.length > 0 ? wordConfidences : undefined,
+            meanConfidence,
             whisperError,
             chunkCount: 1,
           };
@@ -911,6 +1040,9 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         const isSilent =
           fullTelemetry.isSilent && activeRms.length === 0 && recognizedText.length === 0;
 
+        const streamedConfs = streamedMetricsRef.current.wordConfidences;
+        const meanConfidence = computeMeanConfidence(streamedConfs);
+
         const preview: TranscribePreviewResult = {
           recognizedText,
           isSilent,
@@ -922,6 +1054,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
             streamedMetricsRef.current.pitchContour.length > 0
               ? streamedMetricsRef.current.pitchContour
               : undefined,
+          wordConfidences: streamedConfs.length > 0 ? streamedConfs : undefined,
+          meanConfidence,
           whisperError: streamedMetricsRef.current.whisperError || undefined,
           chunkCount: streamedMetricsRef.current.chunkCount,
         };
@@ -962,6 +1096,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         );
       }
 
+      const fallbackConfs = extractChunkWordConfidences(data);
       const preview: TranscribePreviewResult = {
         recognizedText: cleanRepetitionLoops(String(data.recognizedText ?? '')),
         isSilent: Boolean(data.isSilent),
@@ -970,6 +1105,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         pauseCount: Number(data.pauseCount ?? 0),
         silenceRatio: Number(data.silenceRatio ?? 0),
         pitchContour: Array.isArray(data.pitchContour) ? data.pitchContour : undefined,
+        wordConfidences: fallbackConfs.length > 0 ? fallbackConfs : undefined,
+        meanConfidence: computeMeanConfidence(fallbackConfs),
         whisperError: data.whisperError ? String(data.whisperError) : undefined,
       };
 
@@ -989,6 +1126,8 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     setMicError(null);
     setFinalizeError(null);
     setPreviewResult(null);
+    setVideoEndedDuringRecording(false);
+    videoEndedAtStartRef.current = videoEndedCount;
     onEvaluationError?.(null);
     setRecordingSec(0);
     recordingSecRef.current = 0;
@@ -1165,6 +1304,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const handleCancelActiveTake = () => {
     captureGeneration.current += 1;
     onSetAutoPauseAtSec(null);
+    setVideoEndedDuringRecording(false);
     playerHandleRef.current?.pause();
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       try {
@@ -1187,30 +1327,22 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     revokeActiveAudioUrl();
     setRecordedAudioUrl(null);
     setCapturedSimultaneousSegments(null);
+    setVideoEndedDuringRecording(false);
+    videoEndedAtStartRef.current = videoEndedCount;
 
     if (mode === 'listen_repeat') {
-      let targetSeg = activeSegment;
-      const isCurrentEvaluated = Boolean(
-        latestReport &&
-          !latestReport.isDemo &&
-          latestReport.mode === 'listen_repeat' &&
-          latestReport.segmentIds.includes(activeSegment.id)
-      );
+      const practiceSegs = targetSegments.length > 0 ? targetSegments : [activeSegment];
+      const firstSeg = practiceSegs[0];
+      const lastSeg = practiceSegs[practiceSegs.length - 1];
+      onAdvanceToSegmentIndex?.(firstSeg.index);
 
-      if (isCurrentEvaluated && onAdvanceToNextSegment) {
-        const next = onAdvanceToNextSegment();
-        if (next) {
-          targetSeg = next;
-        }
-      }
-
-      const snap = createSnapshot([targetSeg], 'listen_repeat');
+      const snap = createSnapshot(practiceSegs, 'listen_repeat');
       pendingSnapshotRef.current = snap;
       setTakeSnapshot(snap);
 
       if (playerHandleRef.current) {
-        onSetAutoPauseAtSec(targetSeg.endTime);
-        playerHandleRef.current.seekTo(targetSeg.startTime, true);
+        onSetAutoPauseAtSec(lastSeg.endTime);
+        playerHandleRef.current.seekTo(firstSeg.startTime, true);
         playerHandleRef.current.play();
         updateSessionState('listening');
       } else {
@@ -1273,6 +1405,41 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     }
   };
 
+  const handleNextSentenceSession = async () => {
+    const practiceSegs = targetSegments.length > 0 ? targetSegments : [activeSegment];
+    const lastSeg = practiceSegs[practiceSegs.length - 1];
+    const nextIdx = lastSeg ? lastSeg.index + 1 : activeSegment.index + 1;
+    if (nextIdx >= allSegments.length) return;
+
+    setMicError(null);
+    setFinalizeError(null);
+    setPreviewResult(null);
+    setRecordedWavBlob(null);
+    revokeActiveAudioUrl();
+    setRecordedAudioUrl(null);
+    setCapturedSimultaneousSegments(null);
+    setVideoEndedDuringRecording(false);
+    videoEndedAtStartRef.current = videoEndedCount;
+
+    const nextSeg =
+      (onAdvanceToSegmentIndex ? onAdvanceToSegmentIndex(nextIdx, true) : null) ||
+      allSegments[nextIdx];
+    if (!nextSeg) return;
+
+    const snap = createSnapshot([nextSeg], 'listen_repeat');
+    pendingSnapshotRef.current = snap;
+    setTakeSnapshot(snap);
+
+    if (playerHandleRef.current) {
+      onSetAutoPauseAtSec(nextSeg.endTime);
+      playerHandleRef.current.seekTo(nextSeg.startTime, true);
+      playerHandleRef.current.play();
+      updateSessionState('listening');
+    } else {
+      await startMicrophoneCapture(snap);
+    }
+  };
+
   const handleRecordImmediately = async () => {
     onSetAutoPauseAtSec(null);
     playerHandleRef.current?.pause();
@@ -1314,15 +1481,32 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     }
 
     onSetAutoPauseAtSec(null);
+    const rawCurrentSec = playerHandleRef.current?.getCurrentTime?.() ?? 0;
+    const playerDurationSec = playerHandleRef.current?.getDuration?.() ?? 0;
     const stopVideoSec =
-      playerHandleRef.current?.getCurrentTime?.() ||
-      simultaneousStartVideoSecRef.current + recordingSecRef.current;
+      rawCurrentSec > 0
+        ? rawCurrentSec
+        : simultaneousStartVideoSecRef.current + recordingSecRef.current;
     playerHandleRef.current?.pause();
 
     if (mode === 'simultaneous' && allSegments.length > 0) {
       const startWin = simultaneousStartVideoSecRef.current;
-      const endWin = Math.max(startWin + 2, stopVideoSec);
-      const covered = allSegments.filter(
+      const initialSnap = pendingSnapshotRef.current;
+      const isExplicitSubset =
+        targetSegments.length > 1 && targetSegments.length < allSegments.length;
+      const scopePool = isExplicitSubset ? targetSegments : allSegments;
+      const scopeLastEnd =
+        scopePool[scopePool.length - 1]?.endTime ?? allSegments[allSegments.length - 1].endTime;
+      const targetScopeEnd = initialSnap?.endSec ?? scopeLastEnd;
+      const reachedEnd =
+        videoEndedDuringRecording ||
+        (playerDurationSec > 0 && stopVideoSec >= playerDurationSec - 0.75) ||
+        stopVideoSec >= targetScopeEnd - 0.75;
+      const endWin = reachedEnd
+        ? Math.max(startWin + 2, stopVideoSec, targetScopeEnd, scopeLastEnd)
+        : Math.max(startWin + 2, stopVideoSec);
+
+      const covered = scopePool.filter(
         (s) => s.endTime > startWin + 0.3 && s.startTime < endWin + 0.5
       );
       if (covered.length > 0) {
@@ -1333,6 +1517,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       }
     }
 
+    setVideoEndedDuringRecording(false);
     updateSessionState('finalizing');
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
@@ -1348,6 +1533,11 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
     onEvaluationError?.(null);
 
     try {
+      const trueDurationSec =
+        previewResult?.durationSec && previewResult.durationSec > 0
+          ? previewResult.durationSec
+          : Math.max(1, recordingSecRef.current);
+
       const form = new FormData();
       form.append('audio', recordedWavBlob, 'take.wav');
       form.append('target_text', takeSnapshot.targetText);
@@ -1355,10 +1545,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       form.append('mode', takeSnapshot.mode);
       form.append('video_id', videoId);
       form.append('segment_ids', JSON.stringify(takeSnapshot.segmentIds));
-      form.append(
-        'duration_sec',
-        String(previewResult?.durationSec ?? Math.max(1, recordingSecRef.current))
-      );
+      form.append('duration_sec', String(trueDurationSec));
       form.append('target_duration_sec', String(takeSnapshot.targetDurationSec));
       form.append('start_sec', String(takeSnapshot.startSec));
       form.append('end_sec', String(takeSnapshot.endSec));
@@ -1366,6 +1553,12 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       form.append('audio_end_sec', String(takeSnapshot.endSec));
       if (previewResult?.recognizedText) {
         form.append('recognized_text', previewResult.recognizedText);
+      }
+      if (
+        typeof previewResult?.meanConfidence === 'number' &&
+        Number.isFinite(previewResult.meanConfidence)
+      ) {
+        form.append('mean_confidence', String(previewResult.meanConfidence));
       }
 
       const res = await fetch('/api/shadowing/analyze', {
@@ -1392,9 +1585,16 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         videoId,
         videoTitle,
         channel,
-        previewResult?.durationSec ?? recordingSecRef.current,
+        trueDurationSec,
         dataUrl || recordedAudioUrl || undefined
       );
+
+      const snapKey = takeSnapshot.segmentIds.join(',');
+      setConsecutiveTakeState((prev) => ({
+        segmentKey: snapKey,
+        count: prev.segmentKey === snapKey ? prev.count + 1 : 1,
+      }));
+      setDismissedNudgeKey('');
 
       updateSessionState('reviewed');
       onReportGenerated(report);
@@ -1407,11 +1607,14 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   };
 
   const handleRecordAgain = () => {
+    setCapturedSimultaneousSegments(null);
+    setVideoEndedDuringRecording(false);
     setFinalizeError(null);
     setPreviewResult(null);
     setRecordedWavBlob(null);
     revokeActiveAudioUrl();
     setRecordedAudioUrl(null);
+    setTakeSnapshot(null);
     resetStreamingState();
     updateSessionState('idle');
   };
@@ -1473,6 +1676,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         Number((snap.targetDurationSec * 1.05).toFixed(1))
       );
       report.isDemo = true;
+      setTakeSnapshot(snap);
       updateSessionState('reviewed');
       onReportGenerated(report);
     } catch (err: any) {
@@ -1558,7 +1762,9 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 mb-1.5">
           <span>
             {mode === 'listen_repeat'
-              ? 'Active Sentence Target'
+              ? effectiveSegments.length > 1
+                ? `Selected Sentences Target (${effectiveSegments.length} sentences)`
+                : 'Active Sentence Target'
               : `Continuous Scope (${effectiveSegments.length} Segments)`}
           </span>
           <span className="font-mono-tabular">
@@ -1566,9 +1772,13 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           </span>
         </div>
         <div className="text-sm sm:text-base font-medium text-slate-900 leading-relaxed max-h-28 overflow-y-auto break-words">
-          {language === 'ja' && showFurigana && activeSegment.tokens && activeSegment.tokens.length > 0 ? (
+          {language === 'ja' &&
+          showFurigana &&
+          (mode === 'simultaneous'
+            ? Boolean(activeSegment.tokens && activeSegment.tokens.length > 0)
+            : effectiveSegments.some((s) => s.tokens && s.tokens.length > 0)) ? (
             <span className="inline-flex flex-wrap items-baseline gap-x-0.5">
-              {(mode === 'simultaneous' ? activeSegment.tokens : effectiveSegments.flatMap((s) => s.tokens || [{ surface: s.text }])).map((tok, i) => {
+              {(mode === 'simultaneous' ? activeSegment.tokens || [] : effectiveSegments.flatMap((s) => s.tokens && s.tokens.length > 0 ? s.tokens : [{ surface: s.text }])).map((tok, i) => {
                 const useRuby =
                   tok.reading &&
                   tok.reading !== tok.surface &&
@@ -1588,6 +1798,33 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           )}
         </div>
       </div>
+
+      {/* Non-blocking 5-Repetition Ceiling Nudge */}
+      {consecutiveTakeState.segmentKey === effectiveSegmentKey &&
+        consecutiveTakeState.count >= 5 &&
+        dismissedNudgeKey !== effectiveSegmentKey && (
+          <div
+            role="status"
+            className="p-3 bg-sky-50 border border-sky-200 rounded-lg flex items-start justify-between gap-2 text-xs text-sky-950"
+          >
+            <div className="flex items-start gap-2 min-w-0">
+              <Info className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+              <span>
+                <strong>Tip ({consecutiveTakeState.count} takes on this selection):</strong>{' '}
+                Pronunciation gains often plateau after 4–5 repetitions on the same clip. Try{' '}
+                <strong>blind shadowing</strong> (look away from the transcript) or advance to the next sentences!
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDismissedNudgeKey(effectiveSegmentKey)}
+              aria-label="Dismiss repetition tip"
+              className="text-sky-700 hover:text-sky-950 p-0.5 rounded cursor-pointer shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
       {/* Active Capture / Permission / Listening / Finalizing Status */}
       {(sessionState === 'permission' ||
@@ -1637,7 +1874,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           {sessionState === 'listening' && (
             <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
               <span className="text-xs text-slate-600">
-                Pauses at {formatTimestamp(activeSegment.endTime)}
+                Pauses at {formatTimestamp(pendingSnapshotRef.current?.endSec ?? takeSnapshot?.endSec ?? endSec)}
               </span>
               <button
                 type="button"
@@ -1648,6 +1885,18 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
               </button>
             </div>
           )}
+
+          {(sessionState === 'recording' || sessionState === 'paused') &&
+            mode === 'simultaneous' &&
+            videoEndedDuringRecording && (
+              <div
+                role="status"
+                className="px-2.5 py-1.5 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-900 flex items-center gap-1.5"
+              >
+                <Info className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                <span>Video ended — finish speaking and click Finish Recording</span>
+              </div>
+            )}
 
           {(sessionState === 'recording' || sessionState === 'paused') && (
             <>
@@ -1703,38 +1952,45 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
           {sessionState === 'idle' || sessionState === 'ready' || sessionState === 'reviewed' ? (
             <>
               {(() => {
-                const isListenRepeatEvaluated = Boolean(
-                  mode === 'listen_repeat' &&
-                    latestReport &&
-                    !latestReport.isDemo &&
-                    latestReport.mode === 'listen_repeat' &&
-                    latestReport.segmentIds.includes(activeSegment.id)
-                );
-                const hasNextSentence = activeSegment.index + 1 < allSegments.length;
+                const practiceSegs =
+                  mode === 'listen_repeat'
+                    ? effectiveSegments
+                    : [activeSegment];
+                const lastPracticeSeg =
+                  practiceSegs[practiceSegs.length - 1] || activeSegment;
+                const hasNextSentence =
+                  lastPracticeSeg.index + 1 < allSegments.length;
 
                 return (
-                  <button
-                    type="button"
-                    onClick={handleStartSession}
-                    disabled={isEvaluating}
-                    className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-                  >
-                    {mode === 'listen_repeat' && isListenRepeatEvaluated && hasNextSentence ? (
-                      <>
-                        <ArrowRight className="w-4 h-4" />
-                        <span>Next Sentence</span>
-                      </>
-                    ) : (
-                      <>
-                        <Mic className="w-4 h-4" />
-                        <span>
-                          {sessionState === 'ready' || sessionState === 'reviewed'
-                            ? 'Record Again'
-                            : 'Record Yourself'}
-                        </span>
-                      </>
-                    )}
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleStartSession}
+                      disabled={isEvaluating}
+                      className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      <Mic className="w-4 h-4" />
+                      <span>
+                        {sessionState === 'ready' || sessionState === 'reviewed'
+                          ? 'Record Again'
+                          : 'Record Yourself'}
+                      </span>
+                    </button>
+
+                    {mode === 'listen_repeat' &&
+                      sessionState === 'reviewed' &&
+                      hasNextSentence && (
+                        <button
+                          type="button"
+                          onClick={handleNextSentenceSession}
+                          disabled={isEvaluating}
+                          className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                        >
+                          <span>Next Sentence</span>
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                  </>
                 );
               })()}
 

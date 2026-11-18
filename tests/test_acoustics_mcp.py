@@ -24,6 +24,7 @@ from adk_backend.mcp_server import (
 from adk_backend.tools.whisper_tools import (
     analyze_wav_acoustics,
     compute_deterministic_word_diff,
+    count_english_syllables,
     count_japanese_moras,
     evaluate_acoustics_and_alignment,
 )
@@ -444,3 +445,320 @@ async def test_mcp_tools_and_http_endpoint(
     assert call_json["result"]["isError"] is False
     parsed_content = json.loads(call_json["result"]["content"][0]["text"])
     assert parsed_content["tokens"][0]["reading"] == "ことば"
+
+
+def _make_modulated_pitch_wav(
+    median_hz: float,
+    std_st: float | None = None,
+    std_hz: float | None = None,
+    duration_sec: float = 2.0,
+    sample_rate: int = 16000,
+    amplitude: float = 0.35,
+) -> bytes:
+    """Synthesizes a voiced WAV with controlled Semitone or linear Hz pitch variation."""
+    buf = io.BytesIO()
+    n_frames = int(duration_sec * sample_rate)
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        frames = bytearray()
+        phase = 0.0
+        for i in range(n_frames):
+            t = i / float(sample_rate)
+            if std_st is not None:
+                amp_st = std_st * math.sqrt(2.0)
+                freq = median_hz * (2.0 ** ((amp_st * math.sin(2.0 * math.pi * 1.5 * t)) / 12.0))
+            elif std_hz is not None:
+                amp_hz = std_hz * math.sqrt(2.0)
+                freq = median_hz + amp_hz * math.sin(2.0 * math.pi * 1.5 * t)
+            else:
+                freq = median_hz
+            phase += 2.0 * math.pi * freq / sample_rate
+            env = 0.75 + 0.25 * math.sin(2.0 * math.pi * 2.0 * t)
+            val = max(-32767, min(32767, int(math.sin(phase) * amplitude * env * 32767)))
+            frames.extend(struct.pack("<h", val))
+        wf.writeframes(bytes(frames))
+    return buf.getvalue()
+
+
+def test_semitone_gender_parity_and_monotone_penalty(tmp_path: Path):
+    """Equal 2.5 ST modulation gives male (105 Hz) & female (215 Hz) equal prosody; 10 Hz monotone at 215 Hz is penalized."""
+    male_wav = tmp_path / "male_105hz_2_5st.wav"
+    female_wav = tmp_path / "female_215hz_2_5st.wav"
+    mono_wav = tmp_path / "female_215hz_10hz_mono.wav"
+
+    male_wav.write_bytes(_make_modulated_pitch_wav(median_hz=105.0, std_st=2.5, duration_sec=2.0))
+    female_wav.write_bytes(_make_modulated_pitch_wav(median_hz=215.0, std_st=2.5, duration_sec=2.0))
+    mono_wav.write_bytes(_make_modulated_pitch_wav(median_hz=215.0, std_hz=10.0, duration_sec=2.0))
+
+    ac_male = analyze_wav_acoustics(male_wav)
+    ac_female = analyze_wav_acoustics(female_wav)
+    ac_mono = analyze_wav_acoustics(mono_wav)
+
+    assert abs(ac_male["f0StdSt"] - ac_female["f0StdSt"]) <= 0.25
+    assert ac_mono["f0StdSt"] < 0.85
+
+    target = "We often underestimate how daily rhythm shapes fluency."
+    eval_male = evaluate_acoustics_and_alignment(
+        target_text=target,
+        recognized_text=target,
+        language="en",
+        duration_sec=2.0,
+        target_duration_sec=2.0,
+        acoustics=ac_male,
+    )
+    eval_female = evaluate_acoustics_and_alignment(
+        target_text=target,
+        recognized_text=target,
+        language="en",
+        duration_sec=2.0,
+        target_duration_sec=2.0,
+        acoustics=ac_female,
+    )
+    eval_mono = evaluate_acoustics_and_alignment(
+        target_text=target,
+        recognized_text=target,
+        language="en",
+        duration_sec=2.0,
+        target_duration_sec=2.0,
+        acoustics=ac_mono,
+    )
+
+    assert abs(eval_male["prosodyScore"] - eval_female["prosodyScore"]) <= 2.0
+    assert eval_mono["prosodyScore"] < eval_female["prosodyScore"] - 15.0
+
+
+def test_low_male_68hz_pitch_floor_preservation(tmp_path: Path):
+    """60 Hz pitch floor preserves low 68 Hz male speech with >= 20 voiced frames and valid score."""
+    low_wav = tmp_path / "male_68hz.wav"
+    low_wav.write_bytes(
+        _make_wav_bytes(duration_sec=1.5, amplitude=0.35, f0_start=66.0, f0_end=72.0)
+    )
+    acoustics = analyze_wav_acoustics(low_wav)
+    assert acoustics["isValidWav"] is True
+    assert acoustics["isSilent"] is False
+    assert acoustics["voicedFrames"] >= 20
+    assert 60.0 <= acoustics["f0MedianHz"] <= 76.0
+
+    res = evaluate_acoustics_and_alignment(
+        target_text="Good morning.",
+        recognized_text="Good morning",
+        language="en",
+        duration_sec=1.5,
+        target_duration_sec=1.5,
+        acoustics=acoustics,
+    )
+    assert res["assessmentStatus"] == "scored"
+    assert res["overallScore"] > 50.0
+
+
+def test_mode_b_long_form_non_collapse_and_duration_latency():
+    """3-min Mode B take with 12 clause pauses does not collapse; trailing latency is penalized."""
+    clause = "We practice speaking clearly every single morning"
+    clauses = [clause] * 32  # 32 * 14 = 448 syllables
+    target_text = ", ".join(clauses[:13]) + " " + " ".join(clauses[13:]) + "."
+    assert count_english_syllables(target_text) >= 440
+
+    long_acoustics = {
+        "isValidWav": True,
+        "isSilent": False,
+        "durationSec": 180.0,
+        "rmsDb": -18.0,
+        "energyDb": -18.0,
+        "energyDynamicRangeDb": 8.0,
+        "pauseCount": 14,  # 12 clause boundaries + 2 unplanned mid-clause hesitations
+        "silenceRatio": 0.22,
+        "voicedFrames": 180,
+        "f0StdHz": 22.0,
+        "f0StdSt": 2.4,
+        "f0MedianHz": 145.0,
+        "pitchContour": [145.0] * 30,
+        "peakClipRatio": 0.0,
+    }
+    res_long = evaluate_acoustics_and_alignment(
+        target_text=target_text,
+        recognized_text=target_text,
+        language="en",
+        duration_sec=180.0,
+        target_duration_sec=180.0,
+        acoustics=long_acoustics,
+        mode="simultaneous",
+    )
+    assert res_long["unplannedPauseCount"] == 2
+    assert res_long["fluencyScore"] >= 85.0
+
+    # Trailing recording latency penalty after video ends
+    short_target = "Practice makes progress every single day."
+    ontime_ac = {
+        "isValidWav": True,
+        "isSilent": False,
+        "durationSec": 10.0,
+        "rmsDb": -18.0,
+        "energyDb": -18.0,
+        "energyDynamicRangeDb": 8.0,
+        "pauseCount": 0,
+        "silenceRatio": 0.20,
+        "voicedFrames": 50,
+        "f0StdHz": 22.0,
+        "f0StdSt": 2.4,
+        "pitchContour": [145.0] * 20,
+        "peakClipRatio": 0.0,
+    }
+    late_ac = {**ontime_ac, "durationSec": 25.0}
+    res_ontime = evaluate_acoustics_and_alignment(
+        target_text=short_target,
+        recognized_text=short_target,
+        language="en",
+        duration_sec=10.0,
+        target_duration_sec=10.0,
+        acoustics=ontime_ac,
+        mode="simultaneous",
+    )
+    res_late = evaluate_acoustics_and_alignment(
+        target_text=short_target,
+        recognized_text=short_target,
+        language="en",
+        duration_sec=25.0,
+        target_duration_sec=10.0,
+        acoustics=late_ac,
+        mode="simultaneous",
+    )
+    assert res_late["durationLatencySec"] > 10.0
+    assert res_late["fluencyScore"] < res_ontime["fluencyScore"] - 10.0
+
+
+def test_whisper_boh_hallucination_filter():
+    """Whisper Bag-of-Hallucinations phrases with zero target overlap trigger hallucination_filtered gate."""
+    noisy_acoustics = {
+        "isValidWav": True,
+        "isSilent": False,
+        "durationSec": 1.6,
+        "rmsDb": -28.0,
+        "energyDb": -28.0,
+        "energyDynamicRangeDb": 4.0,
+        "pauseCount": 0,
+        "silenceRatio": 0.45,
+        "voicedFrames": 8,
+        "f0StdHz": 12.0,
+        "f0StdSt": 1.5,
+        "pitchContour": [140.0] * 8,
+        "peakClipRatio": 0.0,
+    }
+    res_boh = evaluate_acoustics_and_alignment(
+        target_text="Practice makes progress.",
+        recognized_text="Thank you for watching!",
+        language="en",
+        duration_sec=1.6,
+        target_duration_sec=1.6,
+        acoustics=noisy_acoustics,
+    )
+    assert res_boh["overallScore"] == 0.0
+    assert res_boh["hardGateTriggered"] is True
+    assert res_boh["assessmentStatus"] == "hallucination_filtered"
+
+    # Real target overlap must NOT be filtered even if target contains phrase
+    res_legit = evaluate_acoustics_and_alignment(
+        target_text="Thank you for watching today.",
+        recognized_text="Thank you for watching",
+        language="en",
+        duration_sec=1.6,
+        target_duration_sec=1.6,
+        acoustics=noisy_acoustics,
+    )
+    assert res_legit["hardGateTriggered"] is False
+    assert res_legit["assessmentStatus"] == "scored"
+
+
+def test_function_word_weights_and_self_repair_non_penalty():
+    """EN/JA function words & particles weigh 0.5x vs 1.0x content words; self-repairs charge 0 penalty."""
+    en_target = "We finished the new project today."
+    en_omit_func = compute_deterministic_word_diff(en_target, "We finished new project today.", "en")
+    en_omit_content = compute_deterministic_word_diff(en_target, "We finished the new today.", "en")
+    assert en_omit_func["contentAccuracyEstimate"] > en_omit_content["contentAccuracyEstimate"]
+
+    ja_target = "私は毎日静かに本を読みます。"
+    ja_omit_particle = compute_deterministic_word_diff(ja_target, "私は毎日静かに本読みます。", "ja")
+    ja_omit_content = compute_deterministic_word_diff(ja_target, "私は毎日静かにを読みます。", "ja")
+    assert ja_omit_particle["contentAccuracyEstimate"] > ja_omit_content["contentAccuracyEstimate"]
+
+    repair_diff = compute_deterministic_word_diff(
+        "We finished the project today.",
+        "We finished the pro project today.",
+        "en",
+    )
+    assert repair_diff["repairCount"] == 1
+    assert repair_diff["contentAccuracyEstimate"] == 100.0
+    assert any(item["status"] == "self_repair" for item in repair_diff["baselineWordDiff"])
+
+
+def test_mode_adaptive_weights():
+    """listen_repeat uses 30/30/20/20 and simultaneous uses 25/20/30/25 while mode=None keeps 35/25/25/15."""
+    acoustics = {
+        "isValidWav": True,
+        "isSilent": False,
+        "durationSec": 4.0,
+        "rmsDb": -18.0,
+        "energyDb": -18.0,
+        "energyDynamicRangeDb": 8.0,
+        "pauseCount": 0,
+        "silenceRatio": 0.15,
+        "voicedFrames": 40,
+        "f0StdHz": 20.0,
+        "f0StdSt": 2.4,
+        "pitchContour": [150.0] * 25,
+        "peakClipRatio": 0.0,
+    }
+    target = "We often underestimate how daily rhythm shapes fluency."
+    spoken = "We often underestimate daily shapes fluency."  # partial accuracy, high fluency
+
+    res_lr = evaluate_acoustics_and_alignment(
+        target_text=target,
+        recognized_text=spoken,
+        language="en",
+        duration_sec=4.0,
+        target_duration_sec=4.0,
+        acoustics=acoustics,
+        mode="listen_repeat",
+    )
+    res_sim = evaluate_acoustics_and_alignment(
+        target_text=target,
+        recognized_text=spoken,
+        language="en",
+        duration_sec=4.0,
+        target_duration_sec=4.0,
+        acoustics=acoustics,
+        mode="simultaneous",
+    )
+    res_legacy = evaluate_acoustics_and_alignment(
+        target_text=target,
+        recognized_text=spoken,
+        language="en",
+        duration_sec=4.0,
+        target_duration_sec=4.0,
+        acoustics=acoustics,
+        mode=None,
+    )
+
+    assert res_lr["overallScore"] == round(
+        0.30 * res_lr["accuracyScore"]
+        + 0.30 * res_lr["pronunciationScore"]
+        + 0.20 * res_lr["fluencyScore"]
+        + 0.20 * res_lr["prosodyScore"],
+        1,
+    )
+    assert res_sim["overallScore"] == round(
+        0.25 * res_sim["accuracyScore"]
+        + 0.20 * res_sim["pronunciationScore"]
+        + 0.30 * res_sim["fluencyScore"]
+        + 0.25 * res_sim["prosodyScore"],
+        1,
+    )
+    assert res_legacy["overallScore"] == round(
+        0.35 * res_legacy["accuracyScore"]
+        + 0.25 * res_legacy["fluencyScore"]
+        + 0.25 * res_legacy["pronunciationScore"]
+        + 0.15 * res_legacy["prosodyScore"],
+        1,
+    )
+    assert res_sim["overallScore"] != res_lr["overallScore"]

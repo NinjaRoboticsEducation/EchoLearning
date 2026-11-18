@@ -257,42 +257,50 @@ Click on any saved lesson to enter the Practice Studio. Choose your mode:
 
 | Mode | How It Works | Best For |
 |:---|:---|:---|
-| **🎯 Listen-Then-Repeat** | Video plays one sentence, pauses, you repeat it | Beginners, precise pronunciation practice |
-| **🌊 Simultaneous Shadowing** | Video plays continuously, you speak along in real time (up to 60 minutes) | Intermediate/advanced learners, building fluency |
+| **🎯 Listen-and-Repeat** | Select one or more continuous sentences with checkboxes. The video plays through your selection and auto-pauses so you can repeat the full passage | Beginners & intermediate learners, precise pronunciation and recall |
+| **🌊 Simultaneous Shadowing** | Put on headphones. The video plays continuously and you speak along in real time (up to 60 minutes). When the video ends, the microphone stays active until you click **Finish Recording** | Intermediate/advanced learners, natural speaking speed and rhythm |
 
 ### 3. Practice and Get Feedback
 
-1. **Speak** — The AI shows your recognized speech in real time.
-2. **Click "Finish Recording"** — Your complete speech is transcribed.
-3. **Click "Analyze Shadowing Result"** — Get your performance score.
+1. **Speak** — The AI shows your recognized speech in real time. In Simultaneous mode, natural pause-aligned chunks stream live while you speak.
+2. **Click "Finish Recording"** — Your complete speech is saved and transcribed.
+3. **Click "Analyze Shadowing Result"** — Get your comprehensive performance score and AI coaching.
 
 ### 4. Read Your Score
 
-Your score has 4 parts:
+EchoLearning uses **science-backed, mode-adaptive scoring** tailored to each practice style:
 
 ```text
-┌─────────────────────────────────────────────┐
-│          YOUR SHADOWING SCORE               │
-├─────────────────────────────────────────────┤
-│  📝 Content Accuracy (35%)                   │
-│     Did you say the right words?             │
-│                                              │
-│  🗣️ Pronunciation (25%)                      │
-│     How clear and correct was each sound?    │
-│                                              │
-│  🏃 Fluency (25%)                            │
-│     Was your speaking speed natural?         │
-│                                              │
-│  🎵 Prosody (15%)                            │
-│     Did your voice rise and fall naturally?  │
-│                                              │
-│  🏆 Overall Score: 78/100                    │
-│  💡 Tip: "Try slowing down on long          │
-│      vowels in 東京 (Tōkyō)!"               │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                   YOUR SHADOWING SCORECARD                             │
+├────────────────────────────────────────────────────────────────────────┤
+│  Mode Weights:                                                         │
+│  • Listen-and-Repeat: 30% Accuracy │ 30% Pronunciation │ 20% Fluency │ 20% Prosody │
+│  • Simultaneous:     25% Accuracy │ 20% Pronunciation │ 30% Fluency │ 25% Prosody │
+├────────────────────────────────────────────────────────────────────────┤
+│  📝 Content Accuracy                                                  │
+│     Did you say the right words? Unstressed function words are gently │
+│     weighted (0.5×), and natural self-repairs are never penalized!     │
+│                                                                        │
+│  🗣️ Pronunciation Clarity                                              │
+│     How clear and correct was each sound? Errors are weighted by       │
+│     Functional Load and word-initial onsets without accent bias.       │
+│                                                                        │
+│  🏃 Fluency & Pacing                                                   │
+│     Smooth speech rate based on active speech time. Punctuation pauses │
+│     are exempt, so your score never collapses on long practice takes!  │
+│                                                                        │
+│  🎵 Prosody & Intonation                                               │
+│     Did your voice rise and fall naturally? Evaluated on a universal   │
+│     logarithmic Semitone scale that is completely fair for all voices. │
+│                                                                        │
+│  🏆 Overall Score: 88/100 (✓ High Mastery · Strong Task Match)         │
+│  💡 AI Coach Drill: 1-1-1 Phrase-Build                                 │
+│     (1) Say missed word 1× → (2) Say local phrase 1× → (3) Full take 1×│
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-Each word is color-coded: ✅ green (correct), 🔴 red (missed), 🟡 yellow (wrong word), 🔵 blue (unclear).
+Each word is color-coded: ✅ green (Matched), 🔵 dashed gray (STT Note), 🟡 yellow (Substituted), 🔴 red (Omitted), ⚪ slate (Added), and 🟣 indigo (Self-repair — natural false starts unpenalized!). Click any word to hear offline pronunciation (**Hear Model**) or play the original video segment (**Hear in Video Clip**).
 
 ---
 
@@ -599,7 +607,7 @@ flowchart TD
     end
 
     subgraph S2 ["2. Practice Studio"]
-        DB --> STUDIO["🎙️ Practice Studio\n(Listen-Then-Repeat or Simultaneous)"]
+        DB --> STUDIO["🎙️ Practice Studio\n(Listen-and-Repeat or Simultaneous)"]
         STUDIO --> DICT["📖 AI Dictionary"]
         STUDIO --> MIC["🗣️ Your Microphone"]
     end
@@ -927,42 +935,50 @@ cd EchoLearning
 
 | モード | 仕組み | こんな練習におすすめ |
 |:---|:---|:---|
-| **🎯 Listen-Then-Repeat（聴いてから復唱）** | 動画が1文再生されたら一時停止し、それを繰り返して発声します | 初心者の方、1語1語の発音を丁寧に確認したいとき |
-| **🌊 Simultaneous Shadowing（同時シャドーイング）** | 動画を止めずに再生し続け、リアルタイムで動画に合わせて発声します（最長60分まで） | 中級・上級者の方、スラスラ話す流暢さを身につけたいとき |
+| **🎯 Listen-and-Repeat（聴いてから復唱）** | チェックボックスで1文または複数文を連続選択。選択した範囲をまとめて連続再生後に自動一時停止し、まとめて復唱します | 初級〜中級の方、丁寧な発音や語順の記憶トレーニングに最適 |
+| **🌊 Simultaneous Shadowing（同時シャドーイング）** | ヘッドホンを着用して練習します。動画を止めずに再生し続け、リアルタイムで動画に合わせて発声します（最長60分まで）。動画が終了しても録音は途切れず、手動で**「Finish Recording」**をクリックするまで自由に発話できます | 中級・上級者の方、自然なスピーキング速度とリズム感を身につけたいとき |
 
 ### 3. 声を出して練習し、フィードバックをもらう
 
-1. **話す** — AIがあなたの声をリアルタイムで文字認識して画面に表示します。
-2. **「Finish Recording」（録音終了）をクリック** — あなたが話した全体の内容が文字起こしされます。
-3. **「Analyze Shadowing Result」（シャドーイング結果を分析）をクリック** — あなたのスピーキング評価スコアが算出されます。
+1. **話す** — AIがあなたの声をリアルタイムで文字認識して画面に表示します。同時シャドーイングでは自然なポーズに合わせて自動でリアルタイムストリーミング認識されます。
+2. **「Finish Recording」（録音終了）をクリック** — あなたが話した全体の内容が文字起こしされ、完全な音声が保存されます。
+3. **「Analyze Shadowing Result」（シャドーイング結果を分析）をクリック** — あなたのスピーキング評価スコアとAIコーチの助言が算出されます。
 
 ### 4. スコアを確認する
 
-スコアは以下の4つの項目で採点されます：
+EchoLearningは、練習スタイルに応じた**音声科学に基づくモード適応型（Mode-Adaptive）スコア**を採用しています：
 
 ```text
-┌─────────────────────────────────────────────┐
-│          シャドーイング評価スコア           │
-├─────────────────────────────────────────────┤
-│  📝 内容の正確さ (35%)                      │
-│     正しい単語を言えていましたか？          │
-│                                             │
-│  🗣️ 発音 (25%)                               │
-│     それぞれの音が明瞭かつ正確でしたか？    │
-│                                             │
-│  🏃 流暢さ (25%)                             │
-│     話すスピードは自然でしたか？            │
-│                                             │
-│  🎵 抑揚・プロソディ (15%)                  │
-│     声の高低やリズムが自然でしたか？        │
-│                                             │
-│  🏆 総合スコア: 78/100                      │
-│  💡 アドバイス: 「『東京（Tōkyō）』の長音を │
-│      もう少し意識して伸ばしてみましょう！」 │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                      シャドーイング総合評価スコア                      │
+├────────────────────────────────────────────────────────────────────────┤
+│  モード別ウェイト配分：                                                │
+│  • Listen-and-Repeat: 内容30% │ 発音30% │ 流暢さ20% │ プロソディ20%    │
+│  • Simultaneous:     内容25% │ 発音20% │ 流暢さ30% │ プロソディ25%    │
+├────────────────────────────────────────────────────────────────────────┤
+│  📝 内容の正確さ (Content Accuracy)                                    │
+│     正しい単語・助詞を発話できましたか？英語の機能語や日本語の助詞は   │
+│     0.5倍の軽い配点とし、言い直し（自己修復）は減点されません！        │
+│                                                                        │
+│  🗣️ 発音の明瞭さ (Pronunciation Clarity)                               │
+│     それぞれの音が明瞭かつ正確でしたか？機能的負荷（FL）や語頭音の     │
+│     重要度を考慮し、不当な訛り減点のない科学的採点を行います。        │
+│                                                                        │
+│  🏃 流暢さ・発話速度 (Fluency & Pacing)                                │
+│     実発話時間に基づく自然なスピードを測定。句読点での息継ぎは減点    │
+│     免除されるため、長時間の練習でもスコアがゼロに崩壊しません！       │
+│                                                                        │
+│  🎵 抑揚・プロソディ (Prosody & Intonation)                            │
+│     声の高低やリズムが自然でしたか？男性・女性・声の高さに偏らない     │
+│     対数半音（Semitone）スケールで公平にイントネーションを評価します。 │
+│                                                                        │
+│  🏆 総合スコア: 88/100（✓ High Mastery · Strong Task Match）           │
+│  💡 AIコーチ実践ドリル: 1-1-1 Phrase-Build                             │
+│     (1) 苦手単語を1回発話 → (2) 2〜3語のフレーズを1回 → (3) 全文を1回  │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-単語ごとに色分けされて表示されます：✅ 緑色（正解）、🔴 赤色（聞き落とし・未発話）、🟡 黄色（誤った単語）、🔵 青色（発音が不明瞭）。
+単語ごとに色分けされて表示されます：✅ 緑色（正解）、🔵 点線グレー（STT認識揺らぎ注記）、🟡 黄色（誤った単語）、🔴 赤色（聞き落とし・未発話）、⚪ スレート色（余計な挿入語）、🟣 インディゴ（自己修復・言い直し：内容減点なし！）。単語をクリックするとオフライン音声合成（**Hear Model**）や元動画の該当クリップ（**Hear in Video Clip**）を再生できます。
 
 ---
 
@@ -1598,42 +1614,50 @@ cd EchoLearning
 
 | 模式 | 運作方式 | 最適合對象 |
 |:---|:---|:---|
-| **🎯 逐句聆聽跟讀 (Listen-Then-Repeat)** | 影片播放一句後自動暫停，等待你開口複誦 | 初學者、雕琢精準發音 |
-| **🌊 同步影子跟讀 (Simultaneous Shadowing)** | 影片不間斷連續播放，你即時同步跟讀（最長支援 60 分鐘） | 中高階學習者、訓練流利度與語感 |
+| **🎯 逐句聆聽跟讀 (Listen-and-Repeat)** | 透過核取方塊選擇單句或多句連續段落。影片會順暢連續播放所選句子並自動暫停，讓你從容複誦整段內容 | 初學者與中階學習者、雕琢精準發音與語音記憶 |
+| **🌊 同步影子跟讀 (Simultaneous Shadowing)** | 請戴上耳機。影片不間斷連續播放，你即時同步跟讀（最長支援 60 分鐘）。影片播完後麥克風仍維持錄音，直到你手動點擊 **「Finish Recording」** | 中高階學習者、訓練口語流利度、即時反應與節奏感 |
 
 ### 3. 開口練習並取得回饋
 
-1. **開口說話** — AI 會即時顯示辨識到的語音文字。
-2. **點擊「Finish Recording（結束錄音）」** — 系統會將你的完整語音轉為文字。
-3. **點擊「Analyze Shadowing Result（分析跟讀成效）」** — 取得全方位的表現評分。
+1. **開口說話** — AI 會即時顯示辨識到的語音文字。同步影子跟讀模式會在自然的靜音停頓點分段串流辨識。
+2. **點擊「Finish Recording（結束錄音）」** — 系統會保存並轉錄你的完整音訊。
+3. **點擊「Analyze Shadowing Result（分析跟讀成效）」** — 取得結合語音科學的深度評分與 AI 家教專屬建議。
 
 ### 4. 解讀你的成績單
 
-你的評分由 4 個核心維度組成：
+EchoLearning 採用符合語音科學的**模式適應型評分機制 (Mode-Adaptive Scoring)**：
 
 ```text
-┌─────────────────────────────────────────────┐
-│              你的影子跟讀評分               │
-├─────────────────────────────────────────────┤
-│  📝 內容準確度 Content Accuracy (35%)       │
-│     你有沒有說出正確的字詞？                │
-│                                             │
-│  🗣️ 發音表現 Pronunciation (25%)            │
-│     每個音節的發音是否清晰準確？            │
-│                                             │
-│  🏃 流利度 Fluency (25%)                    │
-│     你的說話速度是否自然流暢？              │
-│                                             │
-│  🎵 語調韻律 Prosody (15%)                  │
-│     聲音的抑揚頓挫與起伏是否自然？          │
-│                                             │
-│  🏆 綜合總分 Overall Score: 78/100          │
-│  💡 改進建議 Tip: "試著放慢『東京 (Tōkyō)』 │
-│      長母音的拖音長度！"                    │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        影子跟讀多維度表現成績單                        │
+├────────────────────────────────────────────────────────────────────────┤
+│  練習模式權重分配：                                                    │
+│  • 逐句聆聽跟讀: 內容 30% │ 發音 30% │ 流利度 20% │ 韻律 20%           │
+│  • 同步影子跟讀: 內容 25% │ 發音 20% │ 流利度 30% │ 韻律 25%           │
+├────────────────────────────────────────────────────────────────────────┤
+│  📝 內容準確度 Content Accuracy                                        │
+│     你有沒有說出正確的字詞？英文弱讀功能詞與日文助詞給予 0.5× 友善權重，│
+│     自發性的口誤重說（自我修復）完全不會被扣內容分！                   │
+│                                                                        │
+│  🗣️ 發音清晰度 Pronunciation Clarity                                   │
+│     每個音節是否清晰可辨？依據功能性負載（FL）與字首起音權重精準評估， │
+│     絕不因無傷大雅的口音而產生不公平的扣分。                           │
+│                                                                        │
+│  🏃 口語流利度 Fluency & Pacing                                        │
+│     以實際發話時間精準計算語速。句讀標點處的自然呼吸停頓完全免扣分，   │
+│     徹底解決長篇練習流利度分數歸零的致命漏洞！                         │
+│                                                                        │
+│  🎵 語調韻律 Prosody & Intonation                                      │
+│     聲音的抑揚頓挫是否生動自然？採用對數半音（Semitone）標準化評分，   │
+│     無論男女老幼、高音或低沉嗓音，均享有一致且客觀的語調判定。         │
+│                                                                        │
+│  🏆 綜合總分 Overall Score: 88/100 (✓ High Mastery · Strong Task Match)│
+│  💡 AI 家教 1-1-1 階梯式刻意練習法：                                   │
+│     (1) 盲點單字唸 1 次 → (2) 2-3 字短語唸 1 次 → (3) 全句流暢跟讀 1 次│
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-每個單字都會以顏色標示狀態：✅ 綠色（正確）、🔴 紅色（漏唸）、🟡 黃色（用詞錯誤）、🔵 藍色（發音含糊不清）。
+每個單字都會以顏色標示狀態：✅ 綠色（正確匹配）、🔵 虛線灰色（語音辨識微調註記）、🟡 黃色（用詞替換）、🔴 紅色（漏唸）、⚪ 石板灰（多餘添加詞）、🟣 靛藍色（自我修復：不扣內容分！）。點擊單字可播放離線語音合成示範（**Hear Model**）或跳轉至影片原始片段對照（**Hear in Video Clip**）。
 
 ---
 
@@ -2269,42 +2293,50 @@ cd EchoLearning
 
 | 模式 | 运作方式 | 最佳适用场景 |
 |:---|:---|:---|
-| **🎯 逐句听读跟读 (Listen-Then-Repeat)** | 视频播放一句话后自动暂停，由你进行复述 | 初学者、追求精细纠音练习 |
-| **🌊 流式同步跟读 (Simultaneous Shadowing)** | 视频不间断连续播放，你实时同步开口跟读（单次最长支持 60 分钟） | 中高阶学习者、强化语流与流利度 |
+| **🎯 逐句听读跟读 (Listen-and-Repeat)** | 通过勾选复选框连续选择单句或多句。视频将顺畅连续播放所选内容并自动暂停，方便你完整复述所选文段 | 初学者与中阶学习者、追求精细纠音与语篇记忆 |
+| **🌊 流式同步跟读 (Simultaneous Shadowing)** | 请佩戴耳机。视频不间断连续播放，你实时同步开口跟读（单次最长支持 60 分钟）。视频播放完毕后录音仍保持开启，直到你手动点击 **“完成录音” (Finish Recording)** | 中高阶学习者、强化语流流利度、实时语感与节奏感 |
 
 ### 3. 开口练习并获取反馈
 
-1. **开口发音** —— AI 会实时展示语音转文字的结果。
-2. **点击“完成录音” (Finish Recording)** —— 系统将对你的完整发音进行转录。
-3. **点击“分析跟读表现” (Analyze Shadowing Result)** —— 获取全面的评分报表。
+1. **开口发音** —— AI 会实时展示语音转文字的结果。流式同步跟读模式会在自然的静音停顿间隙分段转录。
+2. **点击“完成录音” (Finish Recording)** —— 系统将完整保存并转录你的全量发音。
+3. **点击“分析跟读表现” (Analyze Shadowing Result)** —— 获取融合语音科学的深度评分报告与 AI 私教建议。
 
 ### 4. 解读你的得分
 
-你的综合成绩由 4 个维度构成：
+EchoLearning 采用符合语音科学的**模式自适应评分机制 (Mode-Adaptive Scoring)**：
 
 ```text
-┌─────────────────────────────────────────────┐
-│               你的跟读综合评分              │
-├─────────────────────────────────────────────┤
-│  📝 文本准确度 (35%)                        │
-│     单词读对了吗？是否有漏词或加词？        │
-│                                             │
-│  🗣️ 发音标准度 (25%)                        │
-│     每个音节的发音清晰度和准确度如何？      │
-│                                             │
-│  🏃 语流流利度 (25%)                        │
-│     说话的节奏与语速是否自然连贯？          │
-│                                             │
-│  🎵 抑扬顿挫/韵律 (15%)                     │
-│     声调起伏与重音分布是否地道自然？        │
-│                                             │
-│  🏆 综合得分：78/100                        │
-│  💡 建议：“尝试在‘東京 (Tōkyō)’的长音部分   │
-│      适当放慢节奏！”                        │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        跟读表现综合能力评估报告                        │
+├────────────────────────────────────────────────────────────────────────┤
+│  模式自适应权重配置：                                                  │
+│  • 逐句听读跟读: 文本准确度 30% │ 发音标准度 30% │ 流利度 20% │ 韵律 20% │
+│  • 流式同步跟读: 文本准确度 25% │ 发音标准度 20% │ 流利度 30% │ 韵律 25% │
+├────────────────────────────────────────────────────────────────────────┤
+│  📝 文本准确度 (Content Accuracy)                                      │
+│     单词读对了吗？英语弱读功能词与日语助词赋予 0.5× 宽容权重，口误自我  │
+│     修正（自我修复）完全不扣内容分！                                   │
+│                                                                        │
+│  🗣️ 发音标准度 (Pronunciation Clarity)                                 │
+│     每个音节的发音清晰度和准确度如何？依据功能性负载（FL）与词首起音   │
+│     重要度精准评估，绝无口音惩罚。                                     │
+│                                                                        │
+│  🏃 语流流利度 (Fluency & Pacing)                                      │
+│     基于纯有效发音时间严谨测算语速。句号逗号标点呼吸停顿完全免扣分，   │
+│     彻底杜绝长篇跟读得分崩溃为零的漏洞！                               │
+│                                                                        │
+│  🎵 抑扬顿挫/韵律 (Prosody & Intonation)                               │
+│     声调起伏与重音分布是否地道自然？采用对数半音（Semitone）标准化打分，│
+│     消除了不同性别声调高低的客观偏差，所有人均享有一致的音调评判。     │
+│                                                                        │
+│  🏆 综合得分：88/100 (✓ High Mastery · Strong Task Match)              │
+│  💡 AI 导师 1-1-1 阶梯跟读法：                                         │
+│     (1) 难词单读 1 次 → (2) 2-3 词短语读 1 次 → (3) 全句流利跟读 1 次  │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-文本中每个单词均有颜色高亮标注：✅ 绿色（发音正确）、🔴 红色（遗漏跳过）、🟡 黄色（读错词汇）、🔵 蓝色（发音模糊不清）。
+文本中每个单词均有颜色高亮标注：✅ 绿色（精准匹配）、🔵 虚线灰色（语音识别微调注记）、🟡 黄色（读错词汇）、🔴 红色（遗漏跳过）、⚪ 石板灰（多余添加词）、🟣 靛蓝色（自我修正：不扣文本分！）。点击单词可即时播放离线语音合成朗读（**Hear Model**）或定位播放原视频对应文段（**Hear in Video Clip**）。
 
 ---
 

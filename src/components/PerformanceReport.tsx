@@ -63,14 +63,84 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
     }
   };
 
-  const getScoreTierLabel = (score: number) => {
-    if (score >= 88) return { text: '✓ High Mastery', color: 'text-emerald-400' };
-    if (score >= 72) return { text: '● Solid Developing Fluency', color: 'text-sky-400' };
-    if (score > 0) return { text: '▲ Needs Targeted Practice', color: 'text-amber-400' };
-    return { text: '✕ No Speech Detected', color: 'text-red-400' };
+  const assessmentStatus = report.assessmentStatus;
+  const isClipped = Boolean(report.isClipped ?? report.metrics?.isClipped);
+  const f0StdSt = report.f0StdSt ?? report.metrics?.f0StdSt;
+  const durationLatencySec =
+    report.durationLatencySec ?? report.metrics?.durationLatencySec;
+  const articulationRateValue =
+    report.articulationRateValue ?? report.metrics?.articulationRateValue;
+  const unplannedPauseCount =
+    report.unplannedPauseCount ?? report.metrics?.unplannedPauseCount;
+  const repairCount =
+    report.repairCount ??
+    report.metrics?.repairCount ??
+    report.wordDiff.filter((t) => t.status === 'self_repair').length;
+
+  const getScoreTierLabel = (score: number, status?: string) => {
+    if (status === 'hallucination_filtered') {
+      return {
+        text: '⚠ Background Noise / Hallucination Filtered',
+        color: 'text-amber-600',
+        note: 'Whisper picked up background noise or a subtitle artifact instead of your target lines. Move closer to your mic and try again.',
+      };
+    }
+    if (status === 'too_short') {
+      return {
+        text: '⚠ Recording Too Short',
+        color: 'text-amber-600',
+        note: 'The recorded clip was shorter than the minimum target duration. Keep speaking through the full phrase before finishing.',
+      };
+    }
+    if (status === 'no_speech') {
+      return {
+        text: '✕ No Speech Detected',
+        color: 'text-red-500',
+        note: 'No clear voice signal was captured. Check your microphone input/permissions and speak at normal conversational volume.',
+      };
+    }
+    if (status === 'decode_error' || status === 'low_audio_quality') {
+      return {
+        text: '⚠ Low Audio Quality',
+        color: 'text-amber-600',
+        note: 'The audio stream could not be decoded cleanly. Check your microphone connection and try another take.',
+      };
+    }
+    if (score >= 88) {
+      return {
+        text: '✓ High Mastery · Strong Task Match',
+        color: 'text-emerald-600',
+        note: 'Strong reproduction and rhythm on this practice clip (task-specific checkpoint, not a generalized proficiency level).',
+      };
+    }
+    if (score >= 72) {
+      return {
+        text: '● Solid Developing Fluency',
+        color: 'text-sky-600',
+        note: undefined,
+      };
+    }
+    if (score > 0) {
+      return {
+        text: '▲ Needs Targeted Practice',
+        color: 'text-amber-600',
+        note: undefined,
+      };
+    }
+    return {
+      text: '✕ No Speech Detected',
+      color: 'text-red-500',
+      note: 'No clear speech was detected in this recording. Check your microphone and try again.',
+    };
   };
 
-  const tier = getScoreTierLabel(report.overallScore);
+  const tier = getScoreTierLabel(report.overallScore, assessmentStatus);
+  const isDiagnosticHardGate = Boolean(
+    assessmentStatus &&
+      ['hallucination_filtered', 'too_short', 'no_speech', 'decode_error', 'low_audio_quality'].includes(
+        assessmentStatus
+      )
+  ) || report.overallScore <= 0;
   const replayAudioSrc =
     report.audioDataUrl ||
     report.audioUrl ||
@@ -80,32 +150,32 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
     {
       label: 'Content Accuracy',
       score: report.accuracyScore ?? report.dimensions.contentAccuracy,
-      basis: 'Objective Transcript Match',
-      desc: 'Measures exact spoken words/morphemes against the original script.',
+      basis: 'Weighted Transcript Match',
+      desc: 'Measures exact spoken words/morphemes against the script (unstressed function words weighted 0.5×; self-repairs unpenalized).',
     },
     {
       label: 'Pronunciation',
       score: report.pronunciationScore ?? report.dimensions.pronunciation,
-      basis: 'Local Acoustic & Phonetic Estimate',
+      basis: 'ASR- & Phonetic-Based Clarity',
       desc:
         report.language === 'ja'
-          ? 'Evaluates kana articulation, long vowels (長音), and double consonants (っ).'
-          : 'Evaluates Whisper token acoustic confidence and phoneme alignment.',
+          ? 'Evaluates kana articulation, long vowels (長音), double consonants (っ), and Whisper acoustic confidence.'
+          : 'Evaluates Whisper acoustic word confidence and Functional-Load / onset-weighted phoneme alignment.',
     },
     {
       label: 'Fluency & Pacing',
       score: report.fluencyScore ?? report.dimensions.fluency,
-      basis: 'Objective Rate + Continuity',
+      basis: 'Articulation Rate + Continuity',
       desc: `Your pace: ${Math.round(report.speechRateWpm ?? report.metrics.speechRateValue)} ${report.metrics.speechRateUnit} (Target: ${Math.round(report.metrics.targetRateValue)} ${report.metrics.speechRateUnit}).`,
     },
     {
       label: 'Prosody & Rhythm',
       score: report.prosodyScore ?? report.dimensions.prosody,
-      basis: 'Local F0 Pitch & Rhythm Analysis',
+      basis: 'Semitone (ST) F0 & Rhythm Analysis',
       desc:
         report.language === 'ja'
-          ? 'Evaluates mora-timed cadence and F0 pitch-accent phrasing.'
-          : 'Evaluates intonation F0 contour variation, energy dynamics, and phrasing.',
+          ? 'Evaluates mora-timed cadence and speaker-normalized Semitone (ST) pitch movement.'
+          : 'Evaluates speaker-normalized Semitone (ST) intonation spread, energy dynamics, and phrasing.',
     },
   ];
 
@@ -148,8 +218,13 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
               {Math.round(report.overallScore)}
               <span className="text-lg font-normal text-slate-400">/100</span>
             </span>
-            <span className={`text-sm font-semibold ${tier.color}`}>{tier.text}</span>
+            <span className={`text-sm font-semibold ${tier.color}`} title={tier.note}>
+              {tier.text}
+            </span>
           </div>
+          {tier.note && !isDiagnosticHardGate && (
+            <p className="text-[11px] text-emerald-800 font-medium">{tier.note}</p>
+          )}
           <p className="text-xs text-slate-600 max-w-2xl leading-relaxed">
             {report.scoreExplanation}
           </p>
@@ -177,6 +252,32 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Step 0 Diagnostics & Microphone Gain Warnings */}
+      {isDiagnosticHardGate && tier.note && (
+        <div
+          role="status"
+          className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5 text-xs text-amber-950"
+        >
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <div className="space-y-0.5">
+            <div className="font-semibold">{tier.text}</div>
+            <p className="text-amber-900">{tier.note}</p>
+          </div>
+        </div>
+      )}
+
+      {isClipped && (
+        <div
+          role="status"
+          className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5 text-xs text-amber-950"
+        >
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <div>
+            <strong>Microphone Clipping Detected:</strong> Your input signal peaked too high. Lower your microphone gain or step back 15–25 cm for cleaner acoustic scoring.
+          </div>
+        </div>
+      )}
 
       {/* 4 Evaluation Dimensions Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -223,9 +324,19 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
               <span>
                 Speech Rate: <strong>{Math.round(report.speechRateWpm ?? report.metrics.speechRateValue)}</strong> {report.metrics.speechRateUnit}
               </span>
+              {typeof articulationRateValue === 'number' && Number.isFinite(articulationRateValue) && (
+                <span>
+                  Articulation: <strong>{Math.round(articulationRateValue)}</strong> {report.language === 'ja' ? 'moras/min' : 'syl/min'}
+                </span>
+              )}
               {typeof report.energyDb === 'number' && (
                 <span>
                   RMS Energy: <strong>{report.energyDb.toFixed(1)}</strong> dBFS
+                </span>
+              )}
+              {typeof f0StdSt === 'number' && Number.isFinite(f0StdSt) && (
+                <span>
+                  Pitch Spread: <strong>{f0StdSt.toFixed(2)} ST</strong>
                 </span>
               )}
               {sampledContour.length > 0 && (
@@ -233,8 +344,21 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
                   F0 Range: <strong>{Math.round(minPitch)}–{Math.round(maxPitch)} Hz</strong>
                 </span>
               )}
+              {typeof unplannedPauseCount === 'number' && Number.isFinite(unplannedPauseCount) && (
+                <span>
+                  Unplanned Pauses: <strong>{unplannedPauseCount}</strong>
+                </span>
+              )}
             </div>
           </div>
+
+          {typeof durationLatencySec === 'number' && durationLatencySec > 0.5 && (
+            <div className="px-2.5 py-1.5 bg-amber-50/80 border border-amber-200/80 rounded-md text-xs text-amber-900">
+              <strong>Trailing Duration Latency:</strong> Recording ran{' '}
+              <span className="font-mono-tabular font-semibold">+{durationLatencySec.toFixed(1)}s</span>{' '}
+              past the target clip span (factored into Fluency &amp; Pacing).
+            </div>
+          )}
 
           {sampledContour.length > 0 && (
             <div
@@ -263,7 +387,9 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
           <div className="flex items-center gap-1.5 font-medium text-slate-800">
             <Info className="w-3.5 h-3.5 text-sky-600 shrink-0" />
             <span>
-              Weighted composite: 35% Content Accuracy · 25% Fluency · 25% Pronunciation · 15% Prosody
+              {report.mode === 'simultaneous'
+                ? 'Weighted composite (Simultaneous): 25% Content Accuracy · 20% Pronunciation · 30% Fluency · 25% Prosody'
+                : 'Weighted composite (Listen-Then-Repeat): 30% Content Accuracy · 30% Pronunciation · 20% Fluency · 20% Prosody'}
             </span>
           </div>
           <button
@@ -276,7 +402,7 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
         </div>
         {showMethodology && (
           <p className="mt-2 text-slate-600 leading-relaxed border-t border-slate-200 pt-2">
-            All four dimension scores are computed deterministically from local 16 kHz PCM acoustic telemetry (F0 pitch contour, RMS energy, pause timing), Whisper word-level alignment/confidence, and MeCab mora segmentation before local ADK coaching feedback is generated.
+            All four dimension scores are computed deterministically from local 16 kHz PCM acoustic telemetry (60–450 Hz Semitone F0 contour, RMS energy, syllable-normalized unplanned pauses, pure articulation rate), Whisper word-level alignment/confidence with Functional Load weighting, and MeCab mora segmentation before local ADK coaching feedback is generated.
           </p>
         )}
       </div>
@@ -304,6 +430,12 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
               <HelpCircle className="w-3.5 h-3.5 text-slate-500" />
               <span>STT Note ({report.metrics.uncertainSttCount})</span>
             </span>
+            {repairCount > 0 && (
+              <span className="inline-flex items-center gap-1">
+                <RotateCcw className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Self-repair ({repairCount})</span>
+              </span>
+            )}
           </div>
         </div>
 
@@ -378,6 +510,21 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
                   </span>
                 );
               }
+              if (tok.status === 'self_repair') {
+                return (
+                  <span
+                    key={idx}
+                    title={
+                      tok.explanation ||
+                      'Immediate self-repair (counted in Repair Fluency, not penalized as a content error)'
+                    }
+                    className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-50 border border-indigo-200 text-indigo-900 rounded-md text-xs font-medium"
+                  >
+                    <RotateCcw className="w-3 h-3 text-indigo-600 shrink-0" />
+                    <span>{tok.word} (Self-repair)</span>
+                  </span>
+                );
+              }
               return (
                 <span
                   key={idx}
@@ -426,19 +573,32 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
                         </span>
                       )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => handlePlayWordTts(item.targetWord)}
-                      disabled={playingWord === item.targetWord}
-                      className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 rounded transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                    >
-                      {playingWord === item.targetWord ? (
-                        <Loader2 className="w-3 h-3 animate-spin text-sky-600" />
-                      ) : (
-                        <Volume2 className="w-3 h-3 text-sky-600" />
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handlePlayWordTts(item.targetWord)}
+                        disabled={playingWord === item.targetWord}
+                        className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 rounded transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        {playingWord === item.targetWord ? (
+                          <Loader2 className="w-3 h-3 animate-spin text-sky-600" />
+                        ) : (
+                          <Volume2 className="w-3 h-3 text-sky-600" />
+                        )}
+                        <span>Hear Model</span>
+                      </button>
+                      {onReplayOriginalSegment && (
+                        <button
+                          type="button"
+                          onClick={onReplayOriginalSegment}
+                          title="Hear this phrase in the original video clip for connected-speech coarticulation"
+                          className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-sky-50 hover:bg-sky-100 text-sky-900 border border-sky-200 rounded transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                        >
+                          <Play className="w-3 h-3 text-sky-600" />
+                          <span>Hear in Video Clip</span>
+                        </button>
                       )}
-                      <span>Hear Model</span>
-                    </button>
+                    </div>
                   </div>
                   <div className="text-[11px] text-slate-500 mt-0.5">
                     {item.category} · Priority: {(item.severity || 'medium').toUpperCase()}
@@ -457,6 +617,39 @@ export const PerformanceReport: React.FC<PerformanceReportProps> = ({
           </div>
         </div>
       )}
+
+      {/* 1-1-1 Phrase-Build Guided Retry Drill */}
+      {report.overallScore > 0 &&
+        (report.pronunciationFeedback?.length > 0 || report.recommendedRetryText) && (
+          <div className="p-3.5 bg-sky-50/70 border border-sky-200/80 rounded-lg space-y-1.5 text-xs text-sky-950">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-semibold">
+                1-1-1 Phrase-Build Retry Drill (Recommended)
+              </span>
+              {onReplayOriginalSegment && (
+                <button
+                  type="button"
+                  onClick={onReplayOriginalSegment}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-sky-100 text-sky-900 border border-sky-200 rounded font-medium cursor-pointer"
+                >
+                  <Play className="w-3 h-3 text-sky-600" />
+                  <span>Hear in Video Clip</span>
+                </button>
+              )}
+            </div>
+            <p className="text-sky-900 leading-relaxed">
+              <strong>(1)</strong> Say the target word <strong>1×</strong> after <em>Hear Model</em> →{' '}
+              <strong>(2)</strong> Say the 2–3 word chunk <strong>1×</strong>
+              {report.recommendedRetryText ? (
+                <>
+                  {' '}
+                  (<span className="font-semibold">"{report.recommendedRetryText}"</span>)
+                </>
+              ) : null}{' '}
+              → <strong>(3)</strong> Re-shadow the full sentence <strong>1×</strong> smoothly.
+            </p>
+          </div>
+        )}
 
       {/* Section D: Personalized Improvement Suggestions */}
       {report.improvementSuggestions?.length > 0 && (

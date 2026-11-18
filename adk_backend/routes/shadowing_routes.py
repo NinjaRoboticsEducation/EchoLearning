@@ -1,7 +1,7 @@
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ from ..tools.whisper_tools import (
     analyze_wav_acoustics,
     compare_with_reference_wav,
     convert_to_16khz_mono_wav,
+    get_min_duration_sec,
     inspect_wav_header,
     transcribe_audio_with_whisper,
 )
@@ -63,6 +64,8 @@ async def _prepare_wav_from_upload(
             "voicedFrames": 0,
             "pitchContour": [],
             "f0StdHz": 0.0,
+            "f0StdSt": 0.0,
+            "f0MedianHz": 0.0,
         }, None
 
     # Check if upload is already a WAV file
@@ -101,6 +104,8 @@ async def _prepare_wav_from_upload(
             "voicedFrames": 0,
             "pitchContour": [],
             "f0StdHz": 0.0,
+            "f0StdSt": 0.0,
+            "f0MedianHz": 0.0,
         }, None
 
 
@@ -161,6 +166,7 @@ async def transcribe_shadowing_preview(
         recognized_text = ""
         whisper_online = False
         whisper_words: list[dict[str, Any]] = []
+        mean_confidence: float | None = None
         whisper_error: str | None = None
 
         if acoustics.get("isValidWav") and not acoustics.get("isSilent") and eval_wav.exists():
@@ -168,6 +174,7 @@ async def transcribe_shadowing_preview(
             recognized_text = (w_res.get("text") or "").strip()
             whisper_online = bool(w_res.get("whisperOnline", False))
             whisper_words = w_res.get("words") or []
+            mean_confidence = w_res.get("meanConfidence")
             whisper_error = w_res.get("error")
 
         resp: dict[str, Any] = {
@@ -181,8 +188,10 @@ async def transcribe_shadowing_preview(
             "voicedFrames": int(acoustics.get("voicedFrames", 0)),
             "pitchContour": acoustics.get("pitchContour", []),
             "f0StdHz": float(acoustics.get("f0StdHz", 0.0)),
+            "f0StdSt": float(acoustics.get("f0StdSt", 0.0)),
             "whisperOnline": whisper_online,
             "wordConfidences": whisper_words,
+            "meanConfidence": mean_confidence,
         }
         if acoustics.get("error"):
             resp["error"] = acoustics["error"]
@@ -202,6 +211,7 @@ async def analyze_shadowing_take(
     language: str = Form("en"),
     mode: str = Form("listen_repeat"),
     recognized_text: str | None = Form(None),
+    mean_confidence: float | None = Form(default=None),
     video_id: str | None = Form(None),
     video_title: str | None = Form(None),
     segment_ids: str | None = Form(None),
@@ -221,28 +231,40 @@ async def analyze_shadowing_take(
     clean_lang = "ja" if language == "ja" else "en"
     clean_mode = "simultaneous" if mode == "simultaneous" else "listen_repeat"
     eff_target_dur = float(target_duration_sec or 4.0)
+    clamped_mean_conf: float | None = (
+        max(0.0, min(1.0, float(mean_confidence)))
+        if isinstance(mean_confidence, (int, float))
+        else None
+    )
 
     raw_path: Path | None = None
     eval_wav: Path | None = None
     wav_bytes: bytes | None = None
-    whisper_info: dict[str, Any] = {"text": "", "words": [], "meanConfidence": None}
+    whisper_info: dict[str, Any] = {
+        "text": "",
+        "words": [],
+        "meanConfidence": clamped_mean_conf,
+    }
     spoken = (recognized_text or "").strip()
 
     try:
         if audio is not None:
             raw_path, eval_wav, acoustics, wav_bytes = await _prepare_wav_from_upload(audio)
             eff_dur = float(acoustics.get("durationSec") or duration_sec or 0.0)
+            min_dur = get_min_duration_sec(clean_target, clean_lang)
 
             if (
                 acoustics.get("isValidWav")
                 and not acoustics.get("isSilent")
-                and eff_dur >= 0.8
+                and eff_dur >= min_dur
                 and int(acoustics.get("voicedFrames", 0)) >= 5
                 and not spoken
                 and eval_wav.exists()
             ):
                 whisper_info = await transcribe_audio_with_whisper(eval_wav, language=clean_lang)
                 spoken = (whisper_info.get("text") or "").strip()
+                if whisper_info.get("meanConfidence") is None and clamped_mean_conf is not None:
+                    whisper_info["meanConfidence"] = clamped_mean_conf
 
             eff_start_sec = audio_start_sec if audio_start_sec is not None else start_sec
             eff_end_sec = audio_end_sec if audio_end_sec is not None else end_sec
@@ -283,6 +305,7 @@ async def analyze_shadowing_take(
                 "silenceRatio": 0.15 if spoken else 1.0,
                 "voicedFrames": 25 if spoken else 0,
                 "f0StdHz": 18.0 if spoken else 0.0,
+                "f0StdSt": 2.4 if spoken else 0.0,
                 "pitchContour": [],
             }
             det_report = create_deterministic_shadowing_report(
@@ -293,6 +316,7 @@ async def analyze_shadowing_take(
                 duration_sec=eff_dur,
                 target_duration_sec=eff_target_dur,
                 acoustics=acoustics,
+                whisper_info=whisper_info,
                 simulated_take=bool(spoken),
             )
 
@@ -303,7 +327,7 @@ async def analyze_shadowing_take(
         )
 
         report_id = f"rep_{uuid.uuid4().hex[:12]}"
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = datetime.now(UTC).isoformat()
         final_report["id"] = report_id
         final_report["videoId"] = video_id or ""
         final_report["videoTitle"] = video_title or ""

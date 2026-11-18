@@ -33,6 +33,7 @@ interface TranscriptReaderProps {
   onSelectSegmentToSeek: (segment: TranscriptSegment) => void;
   onToggleSegmentSelection: (segmentId: string) => void;
   onSelectAllSegments: () => void;
+  onResetToActiveSegment?: () => void;
   onToggleLoopSegment: (segment: TranscriptSegment) => void;
   onStartShadowingSegment: (segment: TranscriptSegment) => void;
   onWordClick: (
@@ -87,6 +88,7 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
   onSelectSegmentToSeek,
   onToggleSegmentSelection,
   onSelectAllSegments,
+  onResetToActiveSegment,
   onToggleLoopSegment,
   onStartShadowingSegment,
   onWordClick,
@@ -249,16 +251,31 @@ export const TranscriptReader: React.FC<TranscriptReaderProps> = ({
             </strong>
           </span>
         </div>
-        <button
-          type="button"
-          onClick={onSelectAllSegments}
-          disabled={disabledControls}
-          className="text-sky-700 hover:text-sky-900 font-medium underline cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
-        >
-          {selectedSegmentIds.length === segments.length
-            ? 'Select Active Only'
-            : 'Select All Segments'}
-        </button>
+        <div className="flex items-center gap-3 shrink-0">
+          {selectedSegmentIds.length > 1 &&
+            selectedSegmentIds.length < segments.length &&
+            onResetToActiveSegment && (
+              <button
+                type="button"
+                onClick={onResetToActiveSegment}
+                disabled={disabledControls}
+                title="Reset selection to only the currently active segment"
+                className="text-slate-600 hover:text-slate-900 font-medium underline cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+              >
+                Reset to Active
+              </button>
+            )}
+          <button
+            type="button"
+            onClick={onSelectAllSegments}
+            disabled={disabledControls}
+            className="text-sky-700 hover:text-sky-900 font-medium underline cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+          >
+            {selectedSegmentIds.length === segments.length
+              ? 'Select Active Only'
+              : 'Select All Segments'}
+          </button>
+        </div>
       </div>
 
       {/* Scrollable Synchronized Segments */}

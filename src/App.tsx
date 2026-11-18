@@ -727,8 +727,19 @@ export default function App() {
       if (prev.includes(segmentId)) {
         return prev.length > 1 ? prev.filter((id) => id !== segmentId) : prev;
       }
-      return [...prev, segmentId];
+      const next = [...prev, segmentId];
+      if (!currentVideo) return next;
+      return currentVideo.segments
+        .filter((s) => next.includes(s.id))
+        .map((s) => s.id);
     });
+  };
+
+  const handleSelectActiveOnly = () => {
+    if (!currentVideo) return;
+    const currentSeg =
+      currentVideo.segments[activeSegmentIndex] || currentVideo.segments[0];
+    setSelectedSegmentIds(currentSeg ? [currentSeg.id] : []);
   };
 
   const handleSelectAllSegments = () => {
@@ -835,11 +846,18 @@ export default function App() {
     return null;
   };
 
-  const handleAdvanceToSegmentIndex = (targetIndex: number): TranscriptSegment | null => {
+  const handleAdvanceToSegmentIndex = (
+    targetIndex: number,
+    selectSingle = false
+  ): TranscriptSegment | null => {
     if (!currentVideo || currentVideo.segments.length === 0) return null;
     const clampedIndex = Math.max(0, Math.min(targetIndex, currentVideo.segments.length - 1));
+    const seg = currentVideo.segments[clampedIndex];
     setActiveSegmentIndex(clampedIndex);
-    return currentVideo.segments[clampedIndex];
+    if (selectSingle && seg) {
+      setSelectedSegmentIds([seg.id]);
+    }
+    return seg;
   };
 
   const handleSaveVocabularyWord = async (entry: DictionaryLookupResult) => {
@@ -1363,6 +1381,7 @@ export default function App() {
                   onSelectSegmentToSeek={handleSelectSegmentToSeek}
                   onToggleSegmentSelection={handleToggleSegmentSelection}
                   onSelectAllSegments={handleSelectAllSegments}
+                  onResetToActiveSegment={handleSelectActiveOnly}
                   onToggleLoopSegment={handleToggleLoopSegment}
                   onStartShadowingSegment={handleStartShadowingSegment}
                   onWordClick={handleWordClick}
@@ -1463,12 +1482,22 @@ export default function App() {
                     }
                   }}
                   onRetryPractice={() => {
-                    const firstSeg =
-                      currentVideo.segments.find((s) =>
-                        latestReport.segmentIds.includes(s.id)
-                      ) || activeSegment;
-                    if (firstSeg) {
-                      handleStartShadowingSegment(firstSeg);
+                    const matchedSegs = currentVideo.segments.filter((s) =>
+                      latestReport.segmentIds.includes(s.id)
+                    );
+                    const firstSeg = matchedSegs[0] || activeSegment;
+                    const lastSeg = matchedSegs[matchedSegs.length - 1] || firstSeg;
+                    if (firstSeg && lastSeg) {
+                      if (matchedSegs.length > 1 && latestReport.mode === 'listen_repeat') {
+                        setActiveSegmentIndex(firstSeg.index);
+                        setSelectedSegmentIds(matchedSegs.map((s) => s.id));
+                        setShadowingMode('listen_repeat');
+                        setAutoPauseAtSec(lastSeg.endTime);
+                        playerHandleRef.current?.seekTo(firstSeg.startTime, true);
+                        playerHandleRef.current?.play();
+                      } else {
+                        handleStartShadowingSegment(firstSeg);
+                      }
                       window.scrollTo({ top: 0, behavior: 'smooth' });
                     }
                   }}

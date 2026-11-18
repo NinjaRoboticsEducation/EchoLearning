@@ -139,7 +139,8 @@ export type DiffTokenStatus =
   | 'omitted'
   | 'substituted'
   | 'inserted'
-  | 'stt_uncertain';
+  | 'stt_uncertain'
+  | 'self_repair';
 
 export interface DiffToken {
   word: string;
@@ -160,6 +161,11 @@ export interface PhonemeFeedbackItem {
 
 export type ShadowingMode = 'listen_repeat' | 'simultaneous';
 
+export interface TranscribeWordConfidence {
+  word?: string;
+  probability?: number | null;
+}
+
 export interface TranscribePreviewResult {
   recognizedText: string;
   isSilent: boolean;
@@ -168,9 +174,20 @@ export interface TranscribePreviewResult {
   pauseCount: number;
   silenceRatio: number;
   pitchContour?: number[];
+  f0StdSt?: number;
+  wordConfidences?: Array<TranscribeWordConfidence | number>;
+  meanConfidence?: number | null;
   whisperError?: string;
   chunkCount?: number;
 }
+
+export type AssessmentStatus =
+  | 'scored'
+  | 'no_speech'
+  | 'too_short'
+  | 'decode_error'
+  | 'low_audio_quality'
+  | 'hallucination_filtered';
 
 export interface ShadowingAssessmentReport {
   id: string;
@@ -184,6 +201,13 @@ export interface ShadowingAssessmentReport {
   targetText: string;
   recognizedTranscript: string;
   overallScore: number;
+  assessmentStatus?: AssessmentStatus | string;
+  f0StdSt?: number | null;
+  unplannedPauseCount?: number | null;
+  repairCount?: number | null;
+  isClipped?: boolean;
+  durationLatencySec?: number | null;
+  articulationRateValue?: number | null;
   dimensions: {
     contentAccuracy: number; // Objective lexical match (0-100)
     pronunciation: number;   // Multimodal acoustic articulation score (0-100)
@@ -199,6 +223,12 @@ export interface ShadowingAssessmentReport {
     omittedCount: number;
     substitutedCount: number;
     uncertainSttCount: number;
+    f0StdSt?: number | null;
+    unplannedPauseCount?: number | null;
+    repairCount?: number | null;
+    isClipped?: boolean;
+    durationLatencySec?: number | null;
+    articulationRateValue?: number | null;
   };
   scoreExplanation: string;
   wordDiff: DiffToken[];

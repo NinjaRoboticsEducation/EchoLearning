@@ -9,6 +9,7 @@ DiffTokenStatus = Literal[
     "omitted",
     "substituted",
     "inserted",
+    "self_repair",
     "stt_uncertain",
     "missing",
 ]
@@ -48,6 +49,12 @@ class AssessmentMetrics(BaseModel):
     omittedCount: int = 0
     substitutedCount: int = 0
     uncertainSttCount: int = 0
+    f0StdSt: float | None = None
+    unplannedPauseCount: int | None = None
+    repairCount: int | None = None
+    isClipped: bool = False
+    durationLatencySec: float | None = None
+    articulationRateValue: float | None = None
 
 
 class ShadowingAssessmentReport(BaseModel):
@@ -90,6 +97,11 @@ class ShadowingAssessmentReport(BaseModel):
     audioDataUrl: str | None = None
     isDemo: bool = False
     status: str | None = None
+    assessmentStatus: str | None = None
+    f0StdSt: float | None = None
+    durationLatencySec: float | None = None
+    isClipped: bool | None = None
+    unplannedPauseCount: int | None = None
 
 
 ShadowingScoreResponse = ShadowingAssessmentReport
